@@ -1,5 +1,12 @@
 # TermiNotes
 
+<table>
+  <tr>
+    <td><img src="screenshot.png" alt="TermiNotes Screenshot" width="600"></td>
+    <td><img src="appicon_display.png" alt="TermiNotes Icon" width="100"></td>
+  </tr>
+</table>
+
 A hyper-lightweight macOS menu bar utility for developers who need to store and sanitize terminal outputs, ASCII diagrams, and multi-line commands without them "breaking."
 
 ## Why TermiNotes?
