@@ -24,18 +24,29 @@ Standard note apps often "help" you by converting straight quotes to smart quote
 - **Zoom & Resize:** On-the-fly font scaling (`CMD +/-`) and a custom corner dragger for window expansion.
 - **Pure AppKit:** Built with native macOS APIs for near-zero memory footprint and maximum responsiveness.
 
-## Shortcuts
+## Installation
 
-| Shortcut | Action |
-| :--- | :--- |
-| `CMD + V` | Paste (preserves all lines/formatting) |
-| `CMD + Shift + C` | **Safe Copy** for Terminal (Sanitized) |
-| `CMD + =` | Zoom In |
-| `CMD + -` | Zoom Out |
-
-## Build
-
+### 1. Build
 ```bash
 swiftc TermiNotesAppKit.swift -o TermiNotes
-./TermiNotes
 ```
+
+### 2. Install (Optional - Global Command)
+To run `terminotes` from anywhere in your terminal:
+```bash
+mkdir -p ~/bin
+cp TermiNotes ~/bin/terminotes
+cp appicon.png ~/bin/appicon.png
+chmod +x ~/bin/terminotes
+```
+*Note: Ensure `~/bin` is in your `$PATH`.*
+
+## Usage
+
+1. **Launch:** Run `terminotes` from your terminal or open the binary.
+2. **Persistence:** Your notes are automatically saved to `~/Library/Application Support/TermiNotes/notes.txt`.
+3. **Shortcuts:**
+    - `CMD + V`: Paste (Raw, no-wrap).
+    - `CMD + Shift + C`: **Safe Copy** for Terminal (Sanitized for multi-line pasting).
+    - `CMD + = / -`: Zoom text.
+4. **Launch at Login:** Toggle this in the menu to have TermiNotes start automatically when you log in.
