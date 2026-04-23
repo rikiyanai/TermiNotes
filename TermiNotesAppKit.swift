@@ -18,8 +18,27 @@ class TerminalSanitizer {
     }
 }
 
-class TermiNotesController: NSViewController {
-    let textView = NSTextView()
+class TermiTextView: NSTextView {
+    override func paste(_ sender: Any?) {
+        let pb = NSPasteboard.general
+        guard let string = pb.string(forType: .string) else { return }
+        
+        let sanitized = string.replacingOccurrences(of: "\r\n", with: "\n")
+                              .replacingOccurrences(of: "\r", with: "\n")
+        
+        if self.shouldChangeText(in: self.selectedRange(), replacementString: sanitized) {
+            self.textStorage?.replaceCharacters(in: self.selectedRange(), with: sanitized)
+            self.didChangeText()
+            
+            // Force layout update to ensure all lines are rendered
+            self.layoutManager?.ensureLayout(for: self.textContainer!)
+            print("TermiNotes: Paste Success. Length: \(sanitized.count)")
+        }
+    }
+}
+
+class TermiNotesController: NSViewController, NSTextDelegate {
+    let textView = TermiTextView()
     let scrollView = NSScrollView()
     var currentFontSize: CGFloat = 13.0
     
@@ -41,21 +60,44 @@ class TermiNotesController: NSViewController {
         copyButton.autoresizingMask = [.minXMargin, .minYMargin]
         container.addSubview(copyButton)
         
-        // ScrollView + TextView
+        // ScrollView Setup
         scrollView.frame = NSRect(x: 0, y: 40, width: 400, height: 230)
+        scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.autoresizingMask = [.width, .height]
         
-        textView.frame = NSRect(x: 0, y: 0, width: 400, height: 230)
+        // TextView Setup - The "Canonical No-Wrap" Recipe
+        let contentSize = scrollView.contentSize
+        textView.frame = NSRect(origin: .zero, size: contentSize)
+        textView.minSize = NSSize(width: 0.0, height: contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = true
-        textView.autoresizingMask = [.width, .height]
+        
+        // IMPORTANT: No .width autoresizing mask for no-wrap
+        textView.autoresizingMask = [] 
+        
         textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = false
+        
         textView.isRichText = false
+        textView.importsGraphics = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.allowsUndo = true
+        textView.backgroundColor = .textBackgroundColor
+        textView.textColor = .textColor
+        textView.delegate = self
         textView.font = .monospacedSystemFont(ofSize: currentFontSize, weight: .regular)
+        
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.isAutomaticDataDetectionEnabled = false
         
         scrollView.documentView = textView
         container.addSubview(scrollView)
@@ -81,21 +123,9 @@ class TermiNotesController: NSViewController {
         self.view = container
     }
     
-    @objc func zoomIn() {
-        currentFontSize += 1
-        updateFont()
-    }
-    
-    @objc func zoomOut() {
-        if currentFontSize > 5 {
-            currentFontSize -= 1
-            updateFont()
-        }
-    }
-    
-    func updateFont() {
-        textView.font = .monospacedSystemFont(ofSize: currentFontSize, weight: .regular)
-    }
+    @objc func zoomIn() { currentFontSize += 1; updateFont() }
+    @objc func zoomOut() { if currentFontSize > 5 { currentFontSize -= 1; updateFont() } }
+    func updateFont() { textView.font = .monospacedSystemFont(ofSize: currentFontSize, weight: .regular) }
 
     @objc func copyForTerminal() {
         let sanitized = TerminalSanitizer.sanitize(textView.string)
@@ -117,31 +147,18 @@ class ResizeHandleView: NSView {
         path.line(to: NSPoint(x: 0, y: bounds.height))
         path.lineWidth = 1.5
         path.stroke()
-        
-        let path2 = NSBezierPath()
-        path2.move(to: NSPoint(x: bounds.width, y: 5))
-        path2.line(to: NSPoint(x: 5, y: bounds.height))
-        path2.lineWidth = 1.5
-        path2.stroke()
     }
     
     override func mouseDragged(with event: NSEvent) {
-        guard let window = self.window, let popover = (NSApp.delegate as? AppDelegate)?.popover else { return }
-        
+        guard let popover = (NSApp.delegate as? AppDelegate)?.popover else { return }
         var newSize = popover.contentSize
         newSize.width += event.deltaX
-        newSize.height -= event.deltaY // Popovers measure from top, deltaY is screen-coord based
-        
-        // Constraints
+        newSize.height -= event.deltaY
         newSize.width = max(200, min(1000, newSize.width))
         newSize.height = max(150, min(800, newSize.height))
-        
         popover.contentSize = newSize
     }
-    
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .resizeLeftRight)
-    }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -151,14 +168,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
-        
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
-            button.title = "TN"
+            if let iconImage = NSImage(contentsOfFile: "appicon.png") {
+                iconImage.isTemplate = true
+                iconImage.size = NSSize(width: 18, height: 18)
+                button.image = iconImage
+            } else { button.title = "TN" }
             button.action = #selector(togglePopover)
             button.target = self
         }
-        
         popover.contentSize = NSSize(width: 400, height: 300)
         popover.behavior = .transient
         popover.contentViewController = controller
@@ -168,36 +187,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu()
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
-        
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        
         editMenu.addItem(NSMenuItem.separator())
-        
         let zoomIn = NSMenuItem(title: "Zoom In", action: #selector(TermiNotesController.zoomIn), keyEquivalent: "=")
         zoomIn.keyEquivalentModifierMask = [.command]
         editMenu.addItem(zoomIn)
-        
         let zoomOut = NSMenuItem(title: "Zoom Out", action: #selector(TermiNotesController.zoomOut), keyEquivalent: "-")
         zoomOut.keyEquivalentModifierMask = [.command]
         editMenu.addItem(zoomOut)
-        
         let termCopy = NSMenuItem(title: "Copy for Terminal", action: #selector(TermiNotesController.copyForTerminal), keyEquivalent: "C")
         termCopy.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(termCopy)
-        
         editMenuItem.submenu = editMenu
         NSApp.mainMenu = mainMenu
     }
 
     @objc func togglePopover() {
         if let button = statusItem?.button {
-            if popover.isShown {
-                popover.performClose(nil)
-            } else {
+            if popover.isShown { popover.performClose(nil) }
+            else {
                 popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 NSApp.activate(ignoringOtherApps: true)
                 controller.textView.window?.makeFirstResponder(controller.textView)
