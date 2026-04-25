@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # TermiNotes Build Script
-# Bundles the Swift files into a proper .app structure
+# Bundles the AppKit version into a proper .app structure
 
 APP_NAME="TermiNotes"
 BUNDLE_DIR="${APP_NAME}.app"
@@ -13,16 +13,19 @@ echo "Creating app bundle structure..."
 mkdir -p "$MACOS_DIR"
 mkdir -p "$RESOURCES_DIR"
 
-echo "Compiling Swift files..."
+echo "Compiling TermiNotes (AppKit version)..."
+# Using TermiNotesAppKit.swift as the main entry point
 swiftc -o "${MACOS_DIR}/${APP_NAME}" \
-    TermiNotesApp.swift \
-    ContentView.swift \
-    TerminalSanitizer.swift \
-    -parse-as-library \
+    TermiNotesAppKit.swift \
     -O
 
 echo "Copying Info.plist..."
 cp Info.plist "${CONTENTS_DIR}/Info.plist"
+
+# Copy appicon.png if it exists
+if [ -f "appicon.png" ]; then
+    cp appicon.png "${RESOURCES_DIR}/appicon.png"
+fi
 
 echo "Successfully built ${BUNDLE_DIR}"
 echo "You can now run it with: open ${BUNDLE_DIR}"

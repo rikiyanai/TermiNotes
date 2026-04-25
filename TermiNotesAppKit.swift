@@ -37,7 +37,7 @@ class TermiTextView: NSTextView {
     }
 }
 
-class TermiNotesController: NSViewController, NSTextDelegate {
+class TermiNotesController: NSViewController, NSTextViewDelegate {
     let textView = TermiTextView()
     let scrollView = NSScrollView()
     var currentFontSize: CGFloat = 13.0
@@ -88,6 +88,7 @@ class TermiNotesController: NSViewController, NSTextDelegate {
         
         textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.lineBreakMode = .byClipping
         
         textView.isRichText = false
         textView.importsGraphics = false
@@ -132,14 +133,33 @@ class TermiNotesController: NSViewController, NSTextDelegate {
     }
     
     func loadSavedContent() {
-        if let content = try? String(contentsOf: saveURL) {
+        if let content = try? String(contentsOf: saveURL, encoding: .utf8) {
             textView.string = content
             textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+            updateWidth()
         }
     }
 
     func textDidChange(_ notification: Notification) {
         saveContent()
+        updateWidth()
+    }
+
+    func updateWidth() {
+        guard let textContainer = textView.textContainer,
+              let layoutManager = textView.layoutManager else { return }
+        
+        layoutManager.ensureLayout(for: textContainer)
+        let usedSize = layoutManager.usedRect(for: textContainer).size
+        
+        // Ensure the text view is at least as wide as the scroll view, 
+        // but can grow much wider for long lines.
+        let minWidth = scrollView.contentSize.width
+        let newWidth = max(minWidth, usedSize.width + 100)
+        
+        if abs(textView.frame.width - newWidth) > 1 {
+            textView.frame = NSRect(x: 0, y: 0, width: newWidth, height: max(textView.frame.height, usedSize.height))
+        }
     }
 
     func saveContent() {
@@ -182,12 +202,12 @@ class ResizeHandleView: NSView {
         guard let popover = (NSApp.delegate as? AppDelegate)?.popover else { return }
         var newSize = popover.contentSize
         newSize.width += event.deltaX
-        newSize.height -= event.deltaY
+        newSize.height += event.deltaY
         newSize.width = max(200, min(1000, newSize.width))
         newSize.height = max(150, min(800, newSize.height))
         popover.contentSize = newSize
     }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -199,19 +219,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenu()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
-            // Use absolute path relative to the executable for the icon
-            let bundlePath = Bundle.main.bundlePath
-            let iconPath = (bundlePath as NSString).appendingPathComponent("appicon.png")
-            
-            if let iconImage = NSImage(contentsOfFile: iconPath) {
-                iconImage.isTemplate = false // Set to false to show actual colors/design
+            // Prefer the bundled resource if available
+            if let iconPath = Bundle.main.path(forResource: "appicon", ofType: "png"),
+               let iconImage = NSImage(contentsOfFile: iconPath) {
+                iconImage.isTemplate = false
                 iconImage.size = NSSize(width: 18, height: 18)
                 button.image = iconImage
-            } else if let fallbackIcon = NSImage(contentsOfFile: "appicon.png") {
-                fallbackIcon.isTemplate = false
-                fallbackIcon.size = NSSize(width: 18, height: 18)
-                button.image = fallbackIcon
-            } else { button.title = ">_N" }
+            } else if let iconImage = NSImage(contentsOfFile: "appicon.png") {
+                // Fallback for running from source/CWD
+                iconImage.isTemplate = false
+                iconImage.size = NSSize(width: 18, height: 18)
+                button.image = iconImage
+            } else {
+                button.title = ">_N"
+            }
             button.action = #selector(togglePopover)
             button.target = self
         }
@@ -222,6 +243,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func setupMenu() {
         let mainMenu = NSMenu()
+        
+        // 1. Application Menu (Required for standard shortcuts)
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About TermiNotes", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        let quitItem = NSMenuItem(title: "Quit TermiNotes", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(quitItem)
+        appMenuItem.submenu = appMenu
+        
+        // 2. Edit Menu (Where Paste lives)
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
         let editMenu = NSMenu(title: "Edit")
@@ -230,12 +263,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenu.addItem(NSMenuItem.separator())
+        
         let zoomIn = NSMenuItem(title: "Zoom In", action: #selector(TermiNotesController.zoomIn), keyEquivalent: "=")
         zoomIn.keyEquivalentModifierMask = [.command]
         editMenu.addItem(zoomIn)
         let zoomOut = NSMenuItem(title: "Zoom Out", action: #selector(TermiNotesController.zoomOut), keyEquivalent: "-")
         zoomOut.keyEquivalentModifierMask = [.command]
         editMenu.addItem(zoomOut)
+        
         let termCopy = NSMenuItem(title: "Copy for Terminal", action: #selector(TermiNotesController.copyForTerminal), keyEquivalent: "C")
         termCopy.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(termCopy)
@@ -263,7 +298,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             try? FileManager.default.removeItem(at: launchAgentURL)
             sender.state = .off
         } else {
-            let appPath = Bundle.main.bundlePath
             // For a raw binary, we need the absolute path. 
             // Since we're running from CWD usually, let's get the absolute path of the executable.
             let execPath = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
@@ -297,7 +331,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             else {
                 popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 NSApp.activate(ignoringOtherApps: true)
-                controller.textView.window?.makeFirstResponder(controller.textView)
+                if let window = controller.textView.window {
+                    window.makeKey()
+                    window.makeFirstResponder(controller.textView)
+                }
             }
         }
     }
