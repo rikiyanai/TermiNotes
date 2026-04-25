@@ -42,6 +42,13 @@ class TermiNotesController: NSViewController, NSTextDelegate {
     let scrollView = NSScrollView()
     var currentFontSize: CGFloat = 13.0
     
+    var saveURL: URL {
+        let paths = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        let appSupport = paths[0].appendingPathComponent("TermiNotes")
+        try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        return appSupport.appendingPathComponent("notes.txt")
+    }
+
     override func loadView() {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
         
@@ -121,8 +128,24 @@ class TermiNotesController: NSViewController, NSTextDelegate {
         container.addSubview(resizeHandle)
         
         self.view = container
+        loadSavedContent()
     }
     
+    func loadSavedContent() {
+        if let content = try? String(contentsOf: saveURL) {
+            textView.string = content
+            textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+        }
+    }
+
+    func textDidChange(_ notification: Notification) {
+        saveContent()
+    }
+
+    func saveContent() {
+        try? textView.string.write(to: saveURL, atomically: true, encoding: .utf8)
+    }
+
     @objc func zoomIn() { currentFontSize += 1; updateFont() }
     @objc func zoomOut() { if currentFontSize > 5 { currentFontSize -= 1; updateFont() } }
     func updateFont() { textView.font = .monospacedSystemFont(ofSize: currentFontSize, weight: .regular) }
@@ -134,8 +157,14 @@ class TermiNotesController: NSViewController, NSTextDelegate {
         pasteboard.setString(sanitized, forType: .string)
     }
     
-    @objc func clearAll() { textView.string = "" }
-    @objc func quitApp() { NSApplication.shared.terminate(nil) }
+    @objc func clearAll() { 
+        textView.string = ""
+        saveContent()
+    }
+    @objc func quitApp() { 
+        saveContent()
+        NSApplication.shared.terminate(nil) 
+    }
 }
 
 class ResizeHandleView: NSView {
@@ -170,11 +199,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenu()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
-            if let iconImage = NSImage(contentsOfFile: "appicon.png") {
-                iconImage.isTemplate = true
+            // Use absolute path relative to the executable for the icon
+            let bundlePath = Bundle.main.bundlePath
+            let iconPath = (bundlePath as NSString).appendingPathComponent("appicon.png")
+            
+            if let iconImage = NSImage(contentsOfFile: iconPath) {
+                iconImage.isTemplate = false // Set to false to show actual colors/design
                 iconImage.size = NSSize(width: 18, height: 18)
                 button.image = iconImage
-            } else { button.title = "TN" }
+            } else if let fallbackIcon = NSImage(contentsOfFile: "appicon.png") {
+                fallbackIcon.isTemplate = false
+                fallbackIcon.size = NSSize(width: 18, height: 18)
+                button.image = fallbackIcon
+            } else { button.title = ">_N" }
             button.action = #selector(togglePopover)
             button.target = self
         }
@@ -202,8 +239,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let termCopy = NSMenuItem(title: "Copy for Terminal", action: #selector(TermiNotesController.copyForTerminal), keyEquivalent: "C")
         termCopy.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(termCopy)
+        
+        editMenu.addItem(NSMenuItem.separator())
+        let launchToggle = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        launchToggle.state = isLaunchAtLoginEnabled() ? .on : .off
+        editMenu.addItem(launchToggle)
+
         editMenuItem.submenu = editMenu
         NSApp.mainMenu = mainMenu
+    }
+
+    var launchAgentURL: URL {
+        let paths = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)
+        return paths[0].appendingPathComponent("LaunchAgents/com.rikiyanai.terminotes.plist")
+    }
+
+    func isLaunchAtLoginEnabled() -> Bool {
+        return FileManager.default.fileExists(atPath: launchAgentURL.path)
+    }
+
+    @objc func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        if isLaunchAtLoginEnabled() {
+            try? FileManager.default.removeItem(at: launchAgentURL)
+            sender.state = .off
+        } else {
+            let appPath = Bundle.main.bundlePath
+            // For a raw binary, we need the absolute path. 
+            // Since we're running from CWD usually, let's get the absolute path of the executable.
+            let execPath = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
+            
+            let plist = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key>
+                <string>com.rikiyanai.terminotes</string>
+                <key>ProgramArguments</key>
+                <array>
+                    <string>\(execPath)</string>
+                </array>
+                <key>RunAtLoad</key>
+                <true/>
+                <key>ProcessType</key>
+                <string>Interactive</string>
+            </dict>
+            </plist>
+            """
+            try? plist.write(to: launchAgentURL, atomically: true, encoding: .utf8)
+            sender.state = .on
+        }
     }
 
     @objc func togglePopover() {

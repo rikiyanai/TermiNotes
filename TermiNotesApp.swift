@@ -23,10 +23,9 @@ class TermiNotesApp: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem?.button {
-            button.title = "TN"
+            button.title = ">_N"
             button.action = #selector(togglePopover)
-            button.target = self
-            print("TermiNotes: Status item created with title 'TN'")
+            print("TermiNotes: Status item created with title '>_N'")
         } else {
             print("TermiNotes: Failed to create status item button")
         }
