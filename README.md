@@ -19,17 +19,14 @@ chmod +x build.sh
 ```
 
 ### 2. Install (Global Command)
-To launch TermiNotes from your terminal and have it **persist** even after you close the terminal window, add this alias or script to your path:
+To launch TermiNotes from your terminal and have it **persist** even after you close the terminal window:
 ```bash
-# Add to your .zshrc or .bash_profile
-alias terminotes='open -a "/Applications/TermiNotes.app"'
+# 1. Create a launcher script (already in project as terminotes_launcher.sh)
+mkdir -p ~/bin
+cp terminotes_launcher.sh ~/bin/terminotes
+chmod +x ~/bin/terminotes
 ```
-*(Note: Move the built `TermiNotes.app` to your `/Applications` folder first.)*
-
-Alternatively, to run the binary directly and detach it from the terminal:
-```bash
-nohup ./TermiNotes.app/Contents/MacOS/TermiNotes > /dev/null 2>&1 &
-```
+*Note: Ensure `~/bin` is in your `$PATH`. This command uses `open` to launch the app bundle, so it stays alive even if the terminal is killed.*
 
 ## Why TermiNotes?
 
