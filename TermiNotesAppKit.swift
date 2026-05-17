@@ -178,8 +178,12 @@ class TermiNotesController: NSViewController, NSTextViewDelegate {
     }
     
     @objc func clearAll() { 
-        textView.string = ""
-        saveContent()
+        let range = NSRange(location: 0, length: textView.string.count)
+        if textView.shouldChangeText(in: range, replacementString: "") {
+            textView.textStorage?.replaceCharacters(in: range, with: "")
+            textView.didChangeText()
+            saveContent()
+        }
     }
     @objc func quitApp() { 
         saveContent()
@@ -258,6 +262,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
         let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")

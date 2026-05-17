@@ -20,6 +20,7 @@ class TerminalSanitizer {
 }
 
 struct ContentView: View {
+    @Environment(\.undoManager) var undoManager
     @AppStorage("termi_notes_content") private var noteText: String = ""
     @FocusState private var isFocused: Bool
     
@@ -40,7 +41,13 @@ struct ContentView: View {
                 .padding(4)
             Divider()
             HStack {
-                Button("Clear") { noteText = "" }.buttonStyle(.bordered).controlSize(.small)
+                Button("Clear") {
+                    let oldText = noteText
+                    undoManager?.registerUndo(withTarget: NSApp) { _ in
+                        noteText = oldText
+                    }
+                    noteText = ""
+                }.buttonStyle(.bordered).controlSize(.small)
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }.buttonStyle(.bordered).controlSize(.small)
             }.padding(8).background(Color(NSColor.windowBackgroundColor))
@@ -64,6 +71,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var popover = NSPopover()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupMenu()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
             button.title = ">_N"
@@ -77,6 +85,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Force show it once to prove it works
         togglePopover()
+    }
+
+    func setupMenu() {
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About TermiNotes", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Quit TermiNotes", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+        
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+        NSApp.mainMenu = mainMenu
     }
 
     @objc func togglePopover() {

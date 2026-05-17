@@ -1,12 +1,13 @@
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.undoManager) var undoManager
     @AppStorage("termi_notes_content") private var noteText: String = ""
     @FocusState private var isFocused: Bool
     
     var body: some View {
         VStack(spacing: 0) {
-            // Minimal Header
+            // ... (rest of header)
             HStack {
                 Text("TermiNotes")
                     .font(.caption.bold())
@@ -37,6 +38,10 @@ struct ContentView: View {
             // Footer Utilities
             HStack {
                 Button("Clear") {
+                    let oldText = noteText
+                    undoManager?.registerUndo(withTarget: NSApp) { _ in
+                        noteText = oldText
+                    }
                     noteText = ""
                 }
                 .buttonStyle(.bordered)
