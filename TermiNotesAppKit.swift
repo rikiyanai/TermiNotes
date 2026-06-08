@@ -60,6 +60,14 @@ class TermiNotesController: NSViewController, NSTextViewDelegate {
         label.autoresizingMask = [.minYMargin]
         container.addSubview(label)
         
+        let findButton = NSButton(title: "Find", target: nil, action: #selector(NSTextView.performFindPanelAction(_:)))
+        findButton.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+        findButton.bezelStyle = .inline
+        findButton.font = .systemFont(ofSize: 11)
+        findButton.frame = NSRect(x: 210, y: 275, width: 55, height: 20)
+        findButton.autoresizingMask = [.minXMargin, .minYMargin]
+        container.addSubview(findButton)
+        
         let copyButton = NSButton(title: "Copy for Terminal", target: self, action: #selector(copyForTerminal))
         copyButton.bezelStyle = .inline
         copyButton.font = .systemFont(ofSize: 11)
@@ -95,6 +103,8 @@ class TermiNotesController: NSViewController, NSTextViewDelegate {
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
+        textView.usesFindBar = true
+        textView.isIncrementalSearchingEnabled = true
         textView.backgroundColor = .textBackgroundColor
         textView.textColor = .textColor
         textView.delegate = self
@@ -271,6 +281,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(NSMenuItem.separator())
+
+        let findMenu = NSMenu(title: "Find")
+        let findItem = NSMenuItem(title: "Find...", action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "f")
+        findItem.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+        findMenu.addItem(findItem)
+        let findNextItem = NSMenuItem(title: "Find Next", action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "g")
+        findNextItem.tag = Int(NSFindPanelAction.next.rawValue)
+        findMenu.addItem(findNextItem)
+        let findPrevItem = NSMenuItem(title: "Find Previous", action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "G")
+        findPrevItem.tag = Int(NSFindPanelAction.previous.rawValue)
+        findMenu.addItem(findPrevItem)
+        
+        let findMainItem = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
+        findMainItem.submenu = findMenu
+        editMenu.addItem(findMainItem)
+
         editMenu.addItem(NSMenuItem.separator())
         
         let zoomIn = NSMenuItem(title: "Zoom In", action: #selector(TermiNotesController.zoomIn), keyEquivalent: "=")
