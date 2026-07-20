@@ -29,6 +29,66 @@ struct ToggleEntry: Codable {
     var collapsed: Bool
 }
 
+// MARK: - Toggle gutter
+
+/// Left gutter pinned to the scroll view's left edge. Lives as a subview of the scroll view
+/// (above the clip view) and redraws on scroll via bounds-change notifications; chevrons are
+/// mapped document-y -> clip-y per draw. (Drawing markers inside NSTextView.draw was tried
+/// first and is unreliable here — the text view's own rendering clips custom painting in the
+/// margin. NSClipView.addFloatingSubview is unavailable in this SDK.)
+class MarkerGutterView: NSView {
+    weak var controller: TermiNotesController?
+
+    override var isFlipped: Bool { true }
+
+    private func lineRect(for toggle: ToggleEntry) -> NSRect? {
+        guard let tc = controller,
+              let lm = tc.textView.layoutManager,
+              let range = tc.charRangeOfLine(toggle.titleLine) else { return nil }
+        let gr = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        return lm.lineFragmentRect(forGlyphAt: gr.location, effectiveRange: nil)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let tc = controller else { return }
+        let originY = tc.scrollView.contentView.bounds.origin.y // vertical scroll offset
+        let insetY = tc.textView.textContainerInset.height
+        NSColor.secondaryLabelColor.setStroke()
+        for t in tc.toggles {
+            guard let lineRect = lineRect(for: t) else { continue }
+            let cy = lineRect.midY + insetY - originY
+            let path = NSBezierPath()
+            path.lineWidth = 1.5
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            if t.collapsed { // ">"
+                path.move(to: NSPoint(x: 5, y: cy - 4))
+                path.line(to: NSPoint(x: 10, y: cy))
+                path.line(to: NSPoint(x: 5, y: cy + 4))
+            } else { // "v"
+                path.move(to: NSPoint(x: 4, y: cy - 2.5))
+                path.line(to: NSPoint(x: 8, y: cy + 2.5))
+                path.line(to: NSPoint(x: 12, y: cy - 2.5))
+            }
+            path.stroke()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let tc = controller else { return }
+        let originY = tc.scrollView.contentView.bounds.origin.y
+        let y = convert(event.locationInWindow, from: nil).y + originY - tc.textView.textContainerInset.height
+        for t in tc.toggles {
+            guard let lineRect = lineRect(for: t) else { continue }
+            if y >= lineRect.minY && y <= lineRect.maxY {
+                _ = tc.flipToggle(atLine: t.titleLine, titleOnly: true)
+                return
+            }
+        }
+    }
+}
+
+
 class TermiTextView: NSTextView {
     weak var toggleController: TermiNotesController?
     /// Line that was right-clicked, captured in menu(for:) for the toggle context actions.
@@ -71,14 +131,14 @@ class TermiTextView: NSTextView {
 
         let createItem = NSMenuItem(title: "Toggle List", action: #selector(TermiNotesController.createToggleFromSelection(_:)), keyEquivalent: "")
         createItem.target = tc
-        createItem.isEnabled = tc.selectionSpansMultipleLines()
+        createItem.isEnabled = tc.hasSelection()
         menu.insertItem(createItem, at: 0)
         menu.insertItem(NSMenuItem.separator(), at: 1)
         return menu
     }
 
+    /// Option-click on a toggle title line flips it (clicking the gutter chevron is the primary way).
     override func mouseDown(with event: NSEvent) {
-        // Option-click a toggle title line flips it, Notion-style chevron substitute.
         if event.modifierFlags.contains(.option), let tc = toggleController {
             let point = convert(event.locationInWindow, from: nil)
             let line = tc.lineIndex(ofChar: characterIndexForInsertion(at: point))
@@ -98,6 +158,9 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     var lastString: String = ""
     var foldsRendered = false
 
+    // MARK: Toggle gutter
+    let gutter = MarkerGutterView()
+
     // MARK: Screenshot sidebar state
     static let sidebarWidth: CGFloat = 180
     let sidebarContainer = NSView()
@@ -105,7 +168,7 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     let emptyLabel = NSTextField(labelWithString: "No screenshots yet")
     var screenshotFiles: [URL] = []
     let watcher = ScreenshotWatcher()
-    var sidebarVisible: Bool = UserDefaults.standard.object(forKey: "sidebarVisible") as? Bool ?? true
+    var sidebarVisible: Bool = UserDefaults.standard.object(forKey: "sidebarVisible") as? Bool ?? false
 
     var appSupportDir: URL {
         let paths = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
@@ -174,8 +237,14 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         // IMPORTANT: No .width autoresizing mask for no-wrap
         textView.autoresizingMask = []
 
-        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        // IMPORTANT: tracking must be disabled BEFORE setting containerSize — if
+        // widthTracksTextView is still true (AppKit flips it during early lazy setup,
+        // timing-dependent), the width assignment is silently discarded and the
+        // container clamps to a ~10pt floor: every line wraps at one character.
+        // See docs/FAILURE_LOG.md 2026-07-21.
         textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.heightTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.lineBreakMode = .byClipping
 
         textView.isRichText = false
@@ -189,6 +258,7 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         textView.textColor = .textColor
         textView.delegate = self
         textView.font = .monospacedSystemFont(ofSize: currentFontSize, weight: .regular)
+        textView.textContainerInset = NSSize(width: 18, height: 0) // left margin for toggle "> " markers
 
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -199,6 +269,15 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
 
         scrollView.documentView = textView
         container.addSubview(scrollView)
+
+        // Gutter lives in the CONTAINER, above the scroll view: NSScrollView does not
+        // reliably hit-test custom subviews, and this keeps z-order under our control.
+        // Its frame is synced in viewDidLayout; scroll mapping comes from the clip bounds.
+        gutter.controller = self
+        container.addSubview(gutter)
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(clipBoundsDidChange),
+                                               name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
 
         // Screenshot sidebar (hidable), pinned right
         sidebarContainer.frame = NSRect(x: 400 - sideW, y: 40, width: max(sideW, 1), height: 230)
@@ -284,6 +363,7 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         sidebarContainer.isHidden = !sidebarVisible
         sidebarContainer.frame = NSRect(x: w - sideW, y: 40, width: max(sideW, 1), height: h - 70)
         scrollView.frame = NSRect(x: 0, y: 40, width: w - sideW, height: h - 70)
+        gutter.frame = NSRect(x: 0, y: 40, width: 16, height: h - 70)
     }
 
     func loadSavedContent() {
@@ -307,6 +387,14 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     func updateWidth() {
         guard let textContainer = textView.textContainer,
               let layoutManager = textView.layoutManager else { return }
+
+        // Self-healing guard (FAILURE_LOG 2026-07-21): if anything ever re-enables
+        // width tracking, the container width collapses and all text wraps vertically.
+        if textContainer.containerSize.width != CGFloat.greatestFiniteMagnitude {
+            textContainer.widthTracksTextView = false
+            textContainer.heightTracksTextView = false
+            textContainer.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        }
 
         layoutManager.ensureLayout(for: textContainer)
         let usedSize = layoutManager.usedRect(for: textContainer).size
@@ -392,23 +480,38 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         return toggles.first { line >= $0.titleLine && line <= $0.bodyEndLine }
     }
 
-    func selectionSpansMultipleLines() -> Bool {
-        let sel = textView.selectedRange()
-        guard sel.length > 0 else { return false }
-        let s = textView.string as NSString
-        return lineIndex(ofChar: max(sel.location, sel.upperBound - 1), in: s) > lineIndex(ofChar: sel.location, in: s)
+    func hasSelection() -> Bool {
+        textView.selectedRange().length > 0
     }
 
+    /// Notion-style: the selection becomes the toggle BODY. The title is the non-empty line
+    /// directly above it; if there isn't one, a "New Toggle List" title line is inserted.
     @objc func createToggleFromSelection(_ sender: Any?) {
         let sel = textView.selectedRange()
-        let s = textView.string as NSString
         guard sel.length > 0 else { return }
-        let title = lineIndex(ofChar: sel.location, in: s)
-        let end = lineIndex(ofChar: max(sel.location, sel.upperBound - 1), in: s)
-        guard end > title else { return }
+
+        var s = textView.string as NSString
+        var firstBodyLine = lineIndex(ofChar: sel.location, in: s)
+        var lastBodyLine = lineIndex(ofChar: max(sel.location, sel.upperBound - 1), in: s)
+
+        var title = firstBodyLine - 1
+        var aboveIsUsable = false
+        if title >= 0, let r = charRangeOfLine(title) {
+            aboveIsUsable = !s.substring(with: r).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if !aboveIsUsable {
+            textView.insertText("Toggle\n", replacementRange: NSRange(location: sel.location, length: 0))
+            s = textView.string as NSString
+            title = lineIndex(ofChar: sel.location, in: s)
+            firstBodyLine = title + 1
+            lastBodyLine += 1
+        }
+
+        guard lastBodyLine > title else { return }
         // v1: no nesting — a new toggle flattens any it overlaps.
-        toggles.removeAll { $0.titleLine <= end && $0.bodyEndLine >= title }
-        toggles.append(ToggleEntry(titleLine: title, bodyEndLine: end, collapsed: true))
+        toggles.removeAll { $0.titleLine <= lastBodyLine && $0.bodyEndLine >= title }
+        // Created expanded (Notion behavior): the body stays visible until the user collapses it.
+        toggles.append(ToggleEntry(titleLine: title, bodyEndLine: lastBodyLine, collapsed: false))
         toggles.sort { $0.titleLine < $1.titleLine }
         saveToggles()
         renderToggles()
@@ -557,6 +660,11 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
             }
         }
         updateWidth()
+        gutter.needsDisplay = true
+    }
+
+    @objc func clipBoundsDidChange() {
+        gutter.needsDisplay = true
     }
 
     // MARK: - Screenshot sidebar
@@ -575,13 +683,13 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
 
     func loadScreenshots() {
         let files = (try? FileManager.default.contentsOfDirectory(at: screenshotsDir, includingPropertiesForKeys: nil)) ?? []
-        var pngs = files.filter { $0.pathExtension.lowercased() == "png" }
+        var shots = files.filter { ScreenshotWatcher.imageExts.contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
-        if pngs.count > 50 {
-            for url in pngs.dropFirst(50) { try? FileManager.default.removeItem(at: url) }
-            pngs = Array(pngs.prefix(50))
+        if shots.count > 50 {
+            for url in shots.dropFirst(50) { try? FileManager.default.removeItem(at: url) }
+            shots = Array(shots.prefix(50))
         }
-        screenshotFiles = pngs
+        screenshotFiles = shots
         rebuildThumbs()
     }
 
@@ -601,30 +709,30 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         emptyLabel.isHidden = !screenshotFiles.isEmpty
         for url in screenshotFiles {
             guard let thumb = makeThumb(from: url) else { continue }
-            let view = ThumbnailView(frame: NSRect(x: 0, y: 0, width: 160, height: 100))
+            let view = ThumbnailView(frame: NSRect(x: 0, y: 0, width: 160, height: 116))
             view.fileURL = url
             view.setImage(thumb)
-            view.toolTip = url.lastPathComponent
+            view.setPath(url.path)
+            view.toolTip = url.path
             view.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
                 view.widthAnchor.constraint(equalToConstant: 160),
-                view.heightAnchor.constraint(equalToConstant: 100)
+                view.heightAnchor.constraint(equalToConstant: 116)
             ])
-            view.onClick = { [weak self] v in self?.thumbClicked(v) }
+            view.onClick = { [weak self] v, count in self?.thumbClicked(v, clickCount: count) }
             thumbsStack.addArrangedSubview(view)
         }
     }
 
-    /// Single click copies the image back to the clipboard (Maccy-style);
-    /// double click additionally inserts a markdown image link at the caret.
-    func thumbClicked(_ view: ThumbnailView) {
-        guard let url = view.fileURL, let img = NSImage(contentsOf: url) else { return }
+    /// Single click copies the screenshot's file PATH (text) — the watcher ignores
+    /// non-image pasteboard content, so it can't boomerang into the history.
+    /// Double click inserts a markdown image link at the caret.
+    func thumbClicked(_ view: ThumbnailView, clickCount: Int) {
+        guard let url = view.fileURL else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
-        if let tiff = img.tiffRepresentation { pb.setData(tiff, forType: .tiff) }
-        if let data = try? Data(contentsOf: url) { pb.setData(data, forType: .png) }
-        watcher.ignoreCurrentPasteboard() // don't re-capture our own copy
-        if NSApp.currentEvent?.clickCount == 2 {
+        pb.setString(url.path, forType: .string)
+        if clickCount == 2 {
             textView.insertText("![](<\(url.path)>)", replacementRange: textView.selectedRange())
         }
     }
@@ -801,6 +909,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem?.button {
             if popover.isShown { popover.performClose(nil) }
             else {
+                controller.loadScreenshots() // pick up anything captured while closed
                 popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 NSApp.activate(ignoringOtherApps: true)
                 if let window = controller.textView.window {
@@ -815,17 +924,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Screenshot sidebar views
 
 /// A screenshot thumbnail: click to copy back to the clipboard, drag out to other apps.
+/// Shows the stored file path underneath the image.
 class ThumbnailView: NSView, NSDraggingSource {
     var fileURL: URL?
-    var onClick: ((ThumbnailView) -> Void)?
+    var onClick: ((ThumbnailView, Int) -> Void)?
     private let imageView = NSImageView()
+    private let pathLabel = NSTextField(labelWithString: "")
+    private var downPoint: NSPoint?
+    private var dragStarted = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.frame = bounds
+        imageView.frame = NSRect(x: 0, y: 16, width: frame.width, height: frame.height - 16)
         imageView.autoresizingMask = [.width, .height]
         addSubview(imageView)
+
+        pathLabel.font = .systemFont(ofSize: 8)
+        pathLabel.textColor = .tertiaryLabelColor
+        pathLabel.lineBreakMode = .byTruncatingMiddle
+        pathLabel.maximumNumberOfLines = 1
+        pathLabel.frame = NSRect(x: 2, y: 1, width: frame.width - 4, height: 13)
+        pathLabel.autoresizingMask = [.width, .maxYMargin]
+        addSubview(pathLabel)
+
         wantsLayer = true
         layer?.cornerRadius = 4
         layer?.borderWidth = 1
@@ -834,15 +956,29 @@ class ThumbnailView: NSView, NSDraggingSource {
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
 
     func setImage(_ image: NSImage) { imageView.image = image }
+    func setPath(_ path: String) { pathLabel.stringValue = path }
+
+    override func mouseDown(with event: NSEvent) {
+        downPoint = convert(event.locationInWindow, from: nil)
+        dragStarted = false
+    }
 
     override func mouseUp(with event: NSEvent) {
-        if bounds.contains(convert(event.locationInWindow, from: nil)) {
-            onClick?(self)
+        let wasDragging = dragStarted
+        downPoint = nil
+        dragStarted = false
+        if !wasDragging, bounds.contains(convert(event.locationInWindow, from: nil)) {
+            onClick?(self, event.clickCount)
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let url = fileURL else { return }
+        // Threshold: a real click often jitters a pixel or two — without this, every
+        // slightly imperfect click became a 1px drag session and the click was lost.
+        guard let url = fileURL, let down = downPoint, !dragStarted else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        guard abs(p.x - down.x) > 4 || abs(p.y - down.y) > 4 else { return }
+        dragStarted = true
         let item = NSDraggingItem(pasteboardWriter: url as NSURL)
         if let img = imageView.image {
             item.setDraggingFrame(NSRect(x: 0, y: 0, width: 80, height: 50), contents: img)
@@ -857,19 +993,69 @@ class ThumbnailView: NSView, NSDraggingSource {
 
 // MARK: - Screenshot clipboard watcher
 
-/// Polls the general pasteboard (~1s) and snapshots image content (screenshots) to disk.
-/// Images only — text and file copies are ignored.
+/// Watches TWO screenshot sources (~1s poll):
+/// 1. The general pasteboard (Ctrl+Cmd+Shift+3/4 copies the image).
+/// 2. The macOS screenshot save folder (Cmd+Shift+3/4 saves a file without
+///    touching the pasteboard) — location from com.apple.screencapture, default ~/Desktop.
 class ScreenshotWatcher: NSObject {
+    static let imageExts: Set<String> = ["png", "jpg", "jpeg", "tiff", "tif", "heic", "gif", "bmp"]
+
     var screenshotsDir: URL?
     var onCapture: ((URL) -> Void)?
     private var lastChangeCount: Int = NSPasteboard.general.changeCount
     private var timer: Timer?
 
+    private var watchDir: URL?
+    private var knownFiles: Set<String> = []
+    private var pendingSizes: [String: UInt64] = [:]
+
+    /// Content hashes of everything already in the history — re-copies of an existing
+    /// entry (sidebar click-copy echoed back by a clipboard manager, the same file
+    /// saved twice, etc.) are dropped instead of duplicated.
+    private var knownHashes = Set<UInt64>()
+
+    private static func fnv1a(_ data: Data) -> UInt64 {
+        var hash: UInt64 = 14695981039346656037
+        for b in data { hash ^= UInt64(b); hash = hash &* 1099511628211 }
+        return hash
+    }
+
     func start() {
+        watchDir = ScreenshotWatcher.resolveScreenshotDir()
+        if let dir = watchDir, let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
+            knownFiles = Set(files) // pre-existing files are never imported
+        }
+        if let dir = screenshotsDir {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+                for f in files where Self.imageExts.contains(f.pathExtension.lowercased()) {
+                    if let d = try? Data(contentsOf: f) {
+                        let h = Self.fnv1a(d)
+                        DispatchQueue.main.async { self?.knownHashes.insert(h) }
+                    }
+                }
+            }
+        }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.check()
+            self?.checkPasteboard()
+            self?.checkWatchDir()
         }
+    }
+
+    /// Hash an existing history file into the dedup set (called when we copy it out).
+    func noteExisting(_ url: URL) {
+        if let d = try? Data(contentsOf: url) {
+            knownHashes.insert(Self.fnv1a(d))
+        }
+    }
+
+    /// Where macOS saves Cmd+Shift+3/4 screenshots (honors `defaults write com.apple.screencapture location`).
+    static func resolveScreenshotDir() -> URL {
+        if let loc = UserDefaults(suiteName: "com.apple.screencapture")?.string(forKey: "location"), !loc.isEmpty {
+            return URL(fileURLWithPath: (loc as NSString).expandingTildeInPath)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
     }
 
     /// Call after WE write to the pasteboard (thumbnail click-copy) so it isn't re-captured.
@@ -877,7 +1063,7 @@ class ScreenshotWatcher: NSObject {
         lastChangeCount = NSPasteboard.general.changeCount
     }
 
-    private func check() {
+    private func checkPasteboard() {
         let pb = NSPasteboard.general
         guard pb.changeCount != lastChangeCount else { return }
         lastChangeCount = pb.changeCount
@@ -887,10 +1073,11 @@ class ScreenshotWatcher: NSObject {
             png = rep.representation(using: .png, properties: [:])
         }
         guard let data = png, let dir = screenshotsDir else { return }
+        let hash = Self.fnv1a(data)
+        guard !knownHashes.contains(hash) else { return } // duplicate of an existing entry
+        knownHashes.insert(hash)
 
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd-HHmmss"
-        let stamp = fmt.string(from: Date())
+        let stamp = Self.timestamp(for: Date())
         var url = dir.appendingPathComponent("\(stamp).png")
         var n = 2
         while FileManager.default.fileExists(atPath: url.path) {
@@ -899,6 +1086,61 @@ class ScreenshotWatcher: NSObject {
         }
         try? data.write(to: url)
         onCapture?(url)
+    }
+
+    private func checkWatchDir() {
+        guard let dir = watchDir,
+              let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+        knownFiles.formIntersection(files)
+        for name in files where !knownFiles.contains(name) {
+            let ext = (name as NSString).pathExtension.lowercased()
+            guard Self.imageExts.contains(ext) else {
+                knownFiles.insert(name) // not an image; don't rescan it every poll
+                continue
+            }
+            let url = dir.appendingPathComponent(name)
+            let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64) ?? 0
+            // Import only when the size is stable across two polls (screenshot finished writing).
+            if let prev = pendingSizes[name], prev == size, size > 0 {
+                knownFiles.insert(name)
+                pendingSizes.removeValue(forKey: name)
+                importFile(at: url)
+            } else {
+                pendingSizes[name] = size
+            }
+        }
+        for name in pendingSizes.keys where !files.contains(name) {
+            pendingSizes.removeValue(forKey: name)
+        }
+    }
+
+    /// Copies a screenshot file into our history dir, named by its creation date so
+    /// sidebar sorting (newest-first by filename) stays chronological.
+    private func importFile(at url: URL) {
+        guard let dir = screenshotsDir,
+              let data = try? Data(contentsOf: url) else { return }
+        let hash = Self.fnv1a(data)
+        guard !knownHashes.contains(hash) else { return } // same image already in history
+        knownHashes.insert(hash)
+
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let date = (attrs?[.creationDate] as? Date) ?? Date()
+        let stamp = Self.timestamp(for: date)
+        let ext = url.pathExtension.lowercased()
+        var dest = dir.appendingPathComponent("\(stamp).\(ext)")
+        var n = 2
+        while FileManager.default.fileExists(atPath: dest.path) {
+            dest = dir.appendingPathComponent("\(stamp)-\(n).\(ext)")
+            n += 1
+        }
+        try? FileManager.default.copyItem(at: url, to: dest)
+        onCapture?(dest)
+    }
+
+    private static func timestamp(for date: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd-HHmmss"
+        return fmt.string(from: date)
     }
 }
 
