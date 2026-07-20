@@ -1,0 +1,58 @@
+name: AI attribution policy
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: AI attribution policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Reject prohibited commit attribution
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            commit_range="${PR_BASE_SHA}..${PR_HEAD_SHA}"
+          elif [[ -n "$BEFORE_SHA" && ! "$BEFORE_SHA" =~ ^0+$ ]] \
+            && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            commit_range="${BEFORE_SHA}..${CURRENT_SHA}"
+          else
+            commit_range="$CURRENT_SHA"
+          fi
+
+          identity_pattern='(^|[^[:alnum:]_])(claude|codex|agent)([^[:alnum:]_]|$)|@(anthropic|openai)\.com'
+          trailer_pattern='^[[:space:]]*((co-)?authored-by|author|committer)[[:space:]]*:.*(claude|codex|agent)|^[[:space:]]*(claude|codex|agent)(-session)?[[:space:]]*:'
+          failed=0
+
+          while IFS= read -r commit_sha; do
+            identities="$(git show -s --format='%an <%ae>%n%cn <%ce>' "$commit_sha")"
+            message="$(git show -s --format='%B' "$commit_sha")"
+
+            if printf '%s\n' "$identities" | grep -Eiq "$identity_pattern"; then
+              printf 'Blocked commit %s: prohibited author or committer identity.\n' "$commit_sha" >&2
+              failed=1
+            fi
+
+            if printf '%s\n' "$message" | grep -Eiq "$trailer_pattern"; then
+              printf 'Blocked commit %s: prohibited attribution trailer or session metadata.\n' "$commit_sha" >&2
+              failed=1
+            fi
+          done < <(git rev-list "$commit_range")
+
+          exit "$failed"
