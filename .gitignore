@@ -2,6 +2,7 @@
 TermiNotes.app/
 TermiNotes
 TermiNotesStandalone
+TermiNotesSwiftUI
 AppKitTest
 *.o
 *.log
