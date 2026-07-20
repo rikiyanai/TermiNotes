@@ -41,8 +41,8 @@ Standard note apps often "help" you by converting straight quotes to smart quote
     - Converts "smart" quotes and dashes back to ASCII.
     - Trims trailing newlines to prevent accidental command execution.
 - **Zoom & Resize:** On-the-fly font scaling (`CMD +/-`) and a custom corner dragger for window expansion.
-- **Toggle Lists:** Notion-style collapsing. Select a chunk of lines, right-click → **Toggle List** — the first line becomes the title, the rest folds away. Flip it with `Option-click` on the title, `CMD + \`, or the right-click menu (**Expand/Collapse**, **Remove Toggle**). Folds survive restarts (`toggles.json`).
-- **Screenshot Sidebar:** Maccy-style clipboard history for images only. Any screenshot/image you copy (e.g. `Ctrl+CMD+Shift+4`) lands in the sidebar automatically. Click a thumbnail to copy it back, double-click to insert a markdown link at the caret, or drag it out to another app. Toggle the sidebar with the **Shots** button or `CMD + Option + S`.
+- **Toggle Lists:** Notion-style collapsing. Select a chunk of lines, right-click → **Toggle List** — the line above the selection becomes the title (or a `Toggle` line is inserted) and it starts **expanded**, so nothing vanishes. Click the `>`/`v` chevron in the left gutter next to the title to collapse/expand, or use `Option-click` on the title, `CMD + \`, or the right-click menu. Folds survive restarts (`toggles.json`).
+- **Screenshot Sidebar:** Maccy-style clipboard history for images only — hidden by default, toggle with the **Shots** button or `CMD + Option + S`. Works with both clipboard screenshots (`Ctrl+CMD+Shift+3/4`) and regular `CMD+Shift+3/4` file screenshots (watches the macOS screenshot folder). Each entry shows its file path underneath; click to copy the path, double-click to insert a markdown image link at the caret, or drag the image out to another app. History is content-hash deduplicated — the same image never appears twice.
 - **Pure AppKit:** Built with native macOS APIs for near-zero memory footprint and maximum responsiveness.
 
 ## Usage
