@@ -41,6 +41,8 @@ Standard note apps often "help" you by converting straight quotes to smart quote
     - Converts "smart" quotes and dashes back to ASCII.
     - Trims trailing newlines to prevent accidental command execution.
 - **Zoom & Resize:** On-the-fly font scaling (`CMD +/-`) and a custom corner dragger for window expansion.
+- **Toggle Lists:** Notion-style collapsing. Select a chunk of lines, right-click → **Toggle List** — the first line becomes the title, the rest folds away. Flip it with `Option-click` on the title, `CMD + \`, or the right-click menu (**Expand/Collapse**, **Remove Toggle**). Folds survive restarts (`toggles.json`).
+- **Screenshot Sidebar:** Maccy-style clipboard history for images only. Any screenshot/image you copy (e.g. `Ctrl+CMD+Shift+4`) lands in the sidebar automatically. Click a thumbnail to copy it back, double-click to insert a markdown link at the caret, or drag it out to another app. Toggle the sidebar with the **Shots** button or `CMD + Option + S`.
 - **Pure AppKit:** Built with native macOS APIs for near-zero memory footprint and maximum responsiveness.
 
 ## Usage
@@ -51,4 +53,6 @@ Standard note apps often "help" you by converting straight quotes to smart quote
     - `CMD + V`: Paste (Raw, no-wrap).
     - `CMD + Shift + C`: **Safe Copy** for Terminal (Sanitized for multi-line pasting).
     - `CMD + = / -`: Zoom text.
+    - `CMD + \`: Flip the toggle list under the caret.
+    - `CMD + Option + S`: Show/hide the screenshot sidebar.
 4. **Launch at Login:** Toggle this in the menu to have TermiNotes start automatically when you log in.
