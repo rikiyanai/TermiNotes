@@ -20,12 +20,14 @@ class TerminalSanitizer {
 
 // MARK: - Toggle List Model
 
-/// A Notion-style toggle: `titleLine` stays visible, lines titleLine+1...bodyEndLine fold away.
-/// Line numbers are 0-based global line indexes into the canvas; adjusted on every text edit
-/// by the ledger in TermiNotesController.textStorage(didProcessEditing:).
+/// A Notion-style toggle: `titleLine` stays visible; EVERYTHING below it — down to the
+/// next toggle's title (or end of document) — folds away. The body end is IMPLICIT, like
+/// Notion's container: no boundary to maintain, and anything typed/pasted underneath the
+/// title is automatically inside. Line numbers are 0-based global line indexes, adjusted
+/// on every text edit by the ledger in TermiNotesController.textStorage(didProcessEditing:).
+/// (Old toggles.json entries with an explicit bodyEndLine still decode — extra keys ignored.)
 struct ToggleEntry: Codable {
     var titleLine: Int
-    var bodyEndLine: Int
     var collapsed: Bool
 }
 
@@ -375,13 +377,31 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     }
 
     func textDidChange(_ notification: Notification) {
-        saveContent()
+        scheduleSave()
         if !toggles.isEmpty || foldsRendered {
             saveToggles()
             renderToggles()
         } else {
             updateWidth()
         }
+    }
+
+    /// Coalesce per-keystroke writes: the canvas is saved at most once per second
+    /// instead of on every keystroke (rewriting a 430KB+ file per keystroke was the
+    /// real performance cost). Flushed synchronously via flushSave() on quit.
+    private var saveWorkItem: DispatchWorkItem?
+
+    func scheduleSave() {
+        saveWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveContent() }
+        saveWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    func flushSave() {
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        saveContent()
     }
 
     func updateWidth() {
@@ -429,11 +449,11 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         if textView.shouldChangeText(in: range, replacementString: "") {
             textView.textStorage?.replaceCharacters(in: range, with: "")
             textView.didChangeText()
-            saveContent()
+            flushSave()
         }
     }
     @objc func quitApp() {
-        saveContent()
+        flushSave()
         NSApplication.shared.terminate(nil)
     }
 
@@ -475,9 +495,22 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         return NSRange(location: ra.location, length: rb.upperBound - ra.location)
     }
 
+    /// The implicit body end (inclusive): the line before the next toggle's title,
+    /// or the last line of the document. `i` is the index into `toggles` (sorted).
+    func bodyEnd(forToggleAt i: Int) -> Int {
+        let s = textView.string as NSString
+        let lastLine = lineIndex(ofChar: s.length, in: s)
+        guard i >= 0, i < toggles.count else { return lastLine }
+        let next = i + 1 < toggles.count ? toggles[i + 1].titleLine - 1 : lastLine
+        return min(next, lastLine)
+    }
+
     func toggle(containing line: Int) -> ToggleEntry? {
         guard line >= 0 else { return nil }
-        return toggles.first { line >= $0.titleLine && line <= $0.bodyEndLine }
+        for (i, t) in toggles.enumerated() where line >= t.titleLine {
+            if line <= bodyEnd(forToggleAt: i) { return t }
+        }
+        return nil
     }
 
     func hasSelection() -> Bool {
@@ -508,10 +541,11 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         }
 
         guard lastBodyLine > title else { return }
-        // v1: no nesting — a new toggle flattens any it overlaps.
-        toggles.removeAll { $0.titleLine <= lastBodyLine && $0.bodyEndLine >= title }
+        // Same-line titles replace; a new title inside another toggle's body simply
+        // splits it (the body above now ends at this title — implicit ends).
+        toggles.removeAll { $0.titleLine == title }
         // Created expanded (Notion behavior): the body stays visible until the user collapses it.
-        toggles.append(ToggleEntry(titleLine: title, bodyEndLine: lastBodyLine, collapsed: false))
+        toggles.append(ToggleEntry(titleLine: title, collapsed: false))
         toggles.sort { $0.titleLine < $1.titleLine }
         saveToggles()
         renderToggles()
@@ -523,13 +557,17 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
 
     @discardableResult
     func flipToggle(atLine line: Int, titleOnly: Bool = false) -> Bool {
-        guard line >= 0, let i = toggles.firstIndex(where: {
-            line >= $0.titleLine && line <= $0.bodyEndLine && (!titleOnly || line == $0.titleLine)
-        }) else { return false }
-        toggles[i].collapsed.toggle()
-        saveToggles()
-        renderToggles()
-        return true
+        guard line >= 0 else { return false }
+        for (i, t) in toggles.enumerated() {
+            let inRange = titleOnly ? (line == t.titleLine) : (line >= t.titleLine && line <= bodyEnd(forToggleAt: i))
+            if inRange {
+                toggles[i].collapsed.toggle()
+                saveToggles()
+                renderToggles()
+                return true
+            }
+        }
+        return false
     }
 
     @objc func flipContextToggle(_ sender: Any?) {
@@ -538,12 +576,10 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
 
     @objc func removeContextToggle(_ sender: Any?) {
         let line = textView.contextMenuLine
-        let before = toggles.count
-        toggles.removeAll { $0.titleLine <= line && $0.bodyEndLine >= line }
-        if toggles.count != before {
-            saveToggles()
-            renderToggles()
-        }
+        guard let t = toggle(containing: line) else { return }
+        toggles.removeAll { $0.titleLine == t.titleLine }
+        saveToggles()
+        renderToggles()
     }
 
     /// Cmd+\ — flip the toggle containing the caret, if any.
@@ -551,8 +587,10 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         _ = flipToggle(atLine: lineIndex(ofChar: textView.selectedRange().location))
     }
 
-    /// Line-number ledger: shift toggle boundaries on every edit so folds track the text.
-    /// Runs in didProcessEditing (pre-save), against lastString (pre-edit snapshot).
+    /// Line-number ledger: shift toggle TITLE lines on every edit so folds track the text.
+    /// Body ends are implicit (next title / EOF), so the only state to maintain is the
+    /// title line itself — no per-edit boundary bookkeeping. Runs in didProcessEditing
+    /// (pre-save), against lastString (pre-edit snapshot).
     func adjustToggles(editedRange: NSRange, changeInLength delta: Int) {
         let newS = textView.string as NSString
         let oldS = lastString as NSString
@@ -564,36 +602,37 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         let oldEditEndLine = lineIndex(ofChar: preRange.upperBound, in: oldS)
         let newEditEndLine = lineIndex(ofChar: min(editedRange.upperBound, newS.length), in: newS)
         let shift = newEditEndLine - oldEditEndLine
+        let lastLine = lineIndex(ofChar: newS.length, in: newS)
 
         var out: [ToggleEntry] = []
         out.reserveCapacity(toggles.count)
         for var t in toggles {
-            if t.bodyEndLine < editStartLine {
-                out.append(t) // entirely before the edit
-            } else if isInsertion {
-                // Nothing destroyed: shift the toggle only if the insertion lands
-                // at or before the title line's first character.
+            if isInsertion {
+                // Nothing destroyed: shift the title only if the insertion lands
+                // at or before the title line's first character. Anything below the
+                // title is automatically inside the toggle (implicit end).
                 let titleStart = charRangeOfLine(t.titleLine)?.location ?? Int.max
                 if editedRange.location <= titleStart {
                     t.titleLine += shift
-                    t.bodyEndLine += shift
-                } else {
-                    t.bodyEndLine += shift
                 }
                 out.append(t)
             } else if t.titleLine > oldEditEndLine {
                 t.titleLine += shift // entirely after the replaced region
-                t.bodyEndLine += shift
                 out.append(t)
             } else if t.titleLine >= editStartLine {
-                continue // title line destroyed — drop the toggle
+                // Title line was inside the replaced region — re-anchor, don't drop:
+                // the line now at editStartLine becomes the title. (newS.length == 0
+                // means the whole document was deleted — then the toggle dies too.)
+                t.titleLine = editStartLine
+                if t.titleLine <= lastLine && newS.length > 0 { out.append(t) }
             } else {
-                // Body partially eaten: clamp or shift the body end.
-                t.bodyEndLine = t.bodyEndLine > oldEditEndLine ? t.bodyEndLine + shift : newEditEndLine
-                if t.bodyEndLine > t.titleLine { out.append(t) }
+                out.append(t) // edit below the title: nothing to maintain
             }
         }
-        toggles = out
+        // Re-anchoring can collapse ordering or merge two titles onto one line.
+        out.sort { $0.titleLine < $1.titleLine }
+        var seen = Set<Int>()
+        toggles = out.filter { seen.insert($0.titleLine).inserted }
     }
 
     func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range editedRange: NSRange, changeInLength delta: Int) {
@@ -609,8 +648,8 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         let sel = textView.selectedRange()
         guard sel.length == 0 else { return }
         let line = lineIndex(ofChar: sel.location)
-        for t in toggles where t.collapsed {
-            if line > t.titleLine && line <= t.bodyEndLine {
+        for (i, t) in toggles.enumerated() where t.collapsed {
+            if line > t.titleLine && line <= bodyEnd(forToggleAt: i) {
                 if let tr = charRangeOfLine(t.titleLine) {
                     let pos = max(tr.location, tr.upperBound - 1)
                     if pos != sel.location {
@@ -627,9 +666,10 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
               let arr = try? JSONDecoder().decode([ToggleEntry].self, from: data) else { return }
         let s = textView.string as NSString
         let maxLine = lineIndex(ofChar: s.length, in: s)
+        var seen = Set<Int>()
         toggles = arr.compactMap { t in
-            guard t.titleLine >= 0, t.bodyEndLine > t.titleLine, t.titleLine <= maxLine else { return nil }
-            return ToggleEntry(titleLine: t.titleLine, bodyEndLine: min(t.bodyEndLine, maxLine), collapsed: t.collapsed)
+            guard t.titleLine >= 0, t.titleLine <= maxLine, seen.insert(t.titleLine).inserted else { return nil }
+            return ToggleEntry(titleLine: t.titleLine, collapsed: t.collapsed)
         }.sorted { $0.titleLine < $1.titleLine }
     }
 
@@ -648,13 +688,15 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         lm.removeTemporaryAttribute(.font, forCharacterRange: full)
         lm.removeTemporaryAttribute(.foregroundColor, forCharacterRange: full)
         foldsRendered = !toggles.isEmpty
-        for t in toggles {
+        for (i, t) in toggles.enumerated() {
             guard let titleRange = charRangeOfLine(t.titleLine) else { continue }
             let tint = NSRange(location: titleRange.location, length: max(0, titleRange.length - 1))
             lm.addTemporaryAttribute(.backgroundColor,
                                      value: NSColor.labelColor.withAlphaComponent(t.collapsed ? 0.14 : 0.07),
                                      forCharacterRange: tint)
-            if t.collapsed, let bodyRange = charRange(fromLine: t.titleLine + 1, throughLine: t.bodyEndLine), bodyRange.length > 0 {
+            let end = bodyEnd(forToggleAt: i)
+            if t.collapsed, end > t.titleLine,
+               let bodyRange = charRange(fromLine: t.titleLine + 1, throughLine: end), bodyRange.length > 0 {
                 lm.addTemporaryAttribute(.font, value: NSFont.systemFont(ofSize: 0.1), forCharacterRange: bodyRange)
                 lm.addTemporaryAttribute(.foregroundColor, value: NSColor.clear, forCharacterRange: bodyRange)
             }
@@ -918,6 +960,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        controller.flushSave()
     }
 }
 
