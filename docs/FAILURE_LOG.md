@@ -1,5 +1,24 @@
 # Failure Log
 
+## 2026-08-10 — FL-0001: Persistence and latency owners are explicit
+- **Status:** VERIFIED
+- **Category:** PERFORMANCE / MAINTAINABILITY
+- **Overlay:** `adr`; source owners are `Package.swift`, `TermiNotesStorage`, `TextLineIndex`, and `ScreenshotWatcher`.
+- **Requirement:** Preserve raw terminal structure, persist every accepted clipboard screenshot under Application Support, surface persistence failures, and keep the menu-bar process responsive.
+- **Observed mismatch:** Note/toggle/screenshot writes used `try?`; the screenshot list silently deleted entries after 50; the hidden sidebar decoded all history; edits rescanned and laid out the whole document; four legacy entry points plus stale binaries and a SwiftUI specification competed with the AppKit runtime.
+- **Attempt 1:** Split storage, line indexing, and screenshot work behind narrow interfaces. The first bundle verification found that `swift build --show-bin-path` does not build a release product; `build.sh` now uses `set -euo pipefail`, performs the release build, verifies the product exists, bundles it, and signs the app.
+- **Attempt 2:** Moving Desktop enumeration off the main thread was insufficient. Live sampling showed both Foundation and POSIX directory opens could block indefinitely on macOS Desktop privacy control, which also prevented clipboard processing on the shared worker. Runtime capture is now clipboard-first; file-folder capture exists only when a caller supplies a user-authorized URL.
+- **Fix:**
+    - `TermiNotesStorage` atomically writes notes, toggle metadata, screenshots, and the screenshot fingerprint index. Errors reach the popover status and unified log; capture callbacks occur only after the image file exists.
+    - Removed the silent 50-file deletion. Existing screenshot history is retained; only the rendered shelf is bounded to the newest 50 thumbnails.
+    - `ScreenshotWatcher` hashes and writes on a utility queue. A validated fingerprint index avoids rereading unchanged history on every launch.
+    - Hidden-sidebar startup performs no screenshot indexing or thumbnail decoding. ImageIO creates bounded thumbnails serially off-main and caches them.
+    - `TextLineIndex` replaces repeated scans from document start with binary lookup and suffix-only repair. Per-edit full fold/width work is coalesced until a short typing pause; paste no longer forces immediate full layout.
+    - Screenshot capture starts without constructing the editor. The 444 KB editor and its full layout are lazy until the user opens the popover.
+    - `Package.swift` is the only source-list owner. Legacy Swift/AppKit test entry points were deleted; their ignored compiled binaries were moved to `/Users/r/.Trash/TermiNotes-legacy-binaries-20260810` for recovery.
+- **Verification:** `bash verify.sh` passes terminal-text/toggle round trips, explicit failure paths, same-second screenshot uniqueness, isolated clipboard and authorized-folder capture, fingerprint indexing, and a 422,889-UTF-16-unit line-index benchmark (~2.1 ms for the sampled indexed traversal). `swift build`, the release bundle build, strict code-sign verification, and `Info.plist` validation pass. The live signed app idles at 0% CPU with a 12.3 MB physical footprint before the editor is opened. The real status item opens a horizontally rendered monospaced note. All 50 pre-existing screenshots remain, and the aggregate content hash of notes/toggles/screenshots is unchanged across the migration; the new fingerprint index contains 50 entries.
+- **Rewrite decision:** Rust is not justified by current evidence. Native AppKit idles below the prior footprint; observed costs were ownership and execution-path defects in document layout and screenshot I/O. Reconsider only if post-fix interaction profiling falsifies this result.
+
 ## 2026-07-21
 - **Issue:** All text renders one character per line ("vertical text") — the canvas wraps at ~1 character width.
 - **Root Cause Identified:** `textContainer.containerSize.width = greatestFiniteMagnitude` was silently discarded because `widthTracksTextView` was still `true` at assignment time. AppKit flips that flag during early lazy text-system setup, so whether it is already set when `loadView` runs is **timing-dependent** — the same line order worked in the pre-feature app and in isolated harnesses, and failed in this build. With tracking on, the container width follows the (at that moment effectively zero-width) text view and clamps to the ~10pt floor, so every line wraps at one character. Diagnosed via a debug build logging `containerSize` after each `loadView` step: read `(10.0, GFM)` immediately after the setup block; after the fix it reads `(GFM, GFM)` and the text view frame normalized (7407×120823pt for 7534 lines vs 220×4.87M broken).

@@ -13,7 +13,18 @@ let package = Package(
         .executableTarget(
             name: "TermiNotes",
             path: ".",
-            exclude: ["Info.plist", "build.sh", "spec.md", "FAILURE_LOG.md", "dumpster"]
+            exclude: [
+                ".github", "Tests", "docs", "Info.plist", "README.md", "build.sh", "verify.sh",
+                "terminotes_launcher.sh", "appicon.png", "appicon_display.png", "screenshot.png",
+                "TermiNotes.app"
+            ],
+            sources: [
+                "TermiNotesAppKit.swift",
+                "TermiNotesStorage.swift",
+                "TextLineIndex.swift",
+                "ScreenshotPipeline.swift",
+                "TerminalSanitizer.swift"
+            ]
         )
     ]
 )

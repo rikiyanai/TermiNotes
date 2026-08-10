@@ -42,8 +42,12 @@ Standard note apps often "help" you by converting straight quotes to smart quote
     - Trims trailing newlines to prevent accidental command execution.
 - **Zoom & Resize:** On-the-fly font scaling (`CMD +/-`) and a custom corner dragger for window expansion.
 - **Toggle Lists:** Notion-style collapsing. Select a chunk of lines, right-click → **Toggle List** — the line above the selection becomes the title (or a `Toggle` line is inserted) and it starts **expanded**, so nothing vanishes. Click the `>`/`v` chevron in the left gutter next to the title to collapse/expand, or use `Option-click` on the title, `CMD + \`, or the right-click menu. Folds survive restarts (`toggles.json`).
-- **Screenshot Sidebar:** Maccy-style clipboard history for images only — hidden by default, toggle with the **Shots** button or `CMD + Option + S`. Works with both clipboard screenshots (`Ctrl+CMD+Shift+3/4`) and regular `CMD+Shift+3/4` file screenshots (watches the macOS screenshot folder). Each entry shows its file path underneath; click to copy the path, double-click to insert a markdown image link at the caret, or drag the image out to another app. History is content-hash deduplicated — the same image never appears twice.
+- **Screenshot Sidebar:** Maccy-style clipboard history for images only — hidden by default, toggle with the **Shots** button or `CMD + Option + S`. Use the macOS clipboard screenshot shortcut (`Ctrl+CMD+Shift+3/4`); TermiNotes does not probe the privacy-controlled Desktop at launch. Every accepted image is atomically persisted under `~/Library/Application Support/TermiNotes/screenshots`; failures are shown instead of silently ignored, and history is not silently truncated. The shelf renders the newest 50 thumbnails to keep UI work bounded while every file remains on disk. Click a thumbnail to copy its path, double-click to insert a Markdown image link, or drag it to another app.
 - **Pure AppKit:** Built with native macOS APIs for near-zero memory footprint and maximum responsiveness.
+
+## Verification
+
+Run `bash verify.sh` to compile the production sources and verify terminal-text persistence, toggle persistence, unique atomic screenshot writes, explicit write failures, and indexed large-document lookup.
 
 ## Usage
 

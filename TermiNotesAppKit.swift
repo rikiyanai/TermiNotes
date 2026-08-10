@@ -1,23 +1,5 @@
 import AppKit
 
-class TerminalSanitizer {
-    static func sanitize(_ text: String) -> String {
-        var result = text
-        result = result.replacingOccurrences(of: "[\u{201C}\u{201D}]", with: "\"", options: .regularExpression)
-        result = result.replacingOccurrences(of: "[\u{2018}\u{2019}]", with: "'", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\u{2014}", with: "--")
-        result = result.replacingOccurrences(of: "\u{2013}", with: "-")
-        result = result.replacingOccurrences(of: "\u{2026}", with: "...")
-        let lines = result.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        if lines.count > 1 {
-            result = lines.joined(separator: " \\\n")
-        } else {
-            result = lines.first ?? ""
-        }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
 // MARK: - Toggle List Model
 
 /// A Notion-style toggle: `titleLine` stays visible; EVERYTHING below it — down to the
@@ -106,10 +88,6 @@ class TermiTextView: NSTextView {
         if self.shouldChangeText(in: self.selectedRange(), replacementString: sanitized) {
             self.textStorage?.replaceCharacters(in: self.selectedRange(), with: sanitized)
             self.didChangeText()
-
-            // Force layout update to ensure all lines are rendered
-            self.layoutManager?.ensureLayout(for: self.textContainer!)
-            print("TermiNotes: Paste Success. Length: \(sanitized.count)")
         }
     }
 
@@ -155,9 +133,14 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     let scrollView = NSScrollView()
     var currentFontSize: CGFloat = 13.0
 
+    // MARK: Durable state
+    let storage: TermiNotesStorage
+    private let persistenceQueue = DispatchQueue(label: "TermiNotes.Persistence", qos: .utility)
+    private let textLines = TextLineIndex()
+    private let statusLabel = NSTextField(labelWithString: "")
+
     // MARK: Toggle list state
     var toggles: [ToggleEntry] = []
-    var lastString: String = ""
     var foldsRendered = false
 
     // MARK: Toggle gutter
@@ -165,25 +148,26 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
 
     // MARK: Screenshot sidebar state
     static let sidebarWidth: CGFloat = 180
+    static let sidebarDisplayLimit = 50
     let sidebarContainer = NSView()
     let thumbsStack = NSStackView()
     let emptyLabel = NSTextField(labelWithString: "No screenshots yet")
+    let screenshotHeader = NSTextField(labelWithString: "Screenshots")
     var screenshotFiles: [URL] = []
-    let watcher = ScreenshotWatcher()
+    private var totalScreenshotCount = 0
+    private let thumbnailLoader = ScreenshotThumbnailLoader()
+    private let screenshotIndexQueue = DispatchQueue(label: "TermiNotes.ScreenshotIndex", qos: .utility)
+    private var screenshotsNeedReload = true
+    private var screenshotLoadGeneration = 0
     var sidebarVisible: Bool = UserDefaults.standard.object(forKey: "sidebarVisible") as? Bool ?? false
 
-    var appSupportDir: URL {
-        let paths = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-        let dir = paths[0].appendingPathComponent("TermiNotes")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+    init(storage: TermiNotesStorage) {
+        self.storage = storage
+        super.init(nibName: nil, bundle: nil)
     }
-    var saveURL: URL { appSupportDir.appendingPathComponent("notes.txt") }
-    var togglesURL: URL { appSupportDir.appendingPathComponent("toggles.json") }
-    var screenshotsDir: URL {
-        let dir = appSupportDir.appendingPathComponent("screenshots")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
     }
 
     override func loadView() {
@@ -286,12 +270,11 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         sidebarContainer.autoresizingMask = []
         sidebarContainer.isHidden = !sidebarVisible
 
-        let sideHeader = NSTextField(labelWithString: "Screenshots")
-        sideHeader.font = .systemFont(ofSize: 11, weight: .bold)
-        sideHeader.textColor = .secondaryLabelColor
-        sideHeader.frame = NSRect(x: 8, y: 206, width: 120, height: 20)
-        sideHeader.autoresizingMask = [.minYMargin]
-        sidebarContainer.addSubview(sideHeader)
+        screenshotHeader.font = .systemFont(ofSize: 11, weight: .bold)
+        screenshotHeader.textColor = .secondaryLabelColor
+        screenshotHeader.frame = NSRect(x: 8, y: 206, width: 164, height: 20)
+        screenshotHeader.autoresizingMask = [.minYMargin]
+        sidebarContainer.addSubview(screenshotHeader)
 
         let sideScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: sideW, height: 202))
         sideScroll.borderType = .noBorder
@@ -334,6 +317,14 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         quitButton.autoresizingMask = [.minXMargin, .maxYMargin]
         container.addSubview(quitButton)
 
+        statusLabel.font = .systemFont(ofSize: 9)
+        statusLabel.textColor = .systemRed
+        statusLabel.lineBreakMode = .byTruncatingMiddle
+        statusLabel.frame = NSRect(x: 84, y: 11, width: 232, height: 18)
+        statusLabel.autoresizingMask = [.width, .maxYMargin]
+        statusLabel.isHidden = true
+        container.addSubview(statusLabel)
+
         // Resize Handle
         let resizeHandle = ResizeHandleView(frame: NSRect(x: 385, y: 0, width: 15, height: 15))
         resizeHandle.autoresizingMask = [.minXMargin, .maxYMargin]
@@ -343,16 +334,15 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
 
         textView.toggleController = self
         textView.textStorage?.delegate = self
+        do {
+            try storage.prepare()
+        } catch {
+            reportPersistenceError(error, operation: "Prepare storage")
+        }
         loadSavedContent()
-        lastString = textView.string
         loadToggles()
-        renderToggles()
-
-        // Screenshot clipboard watcher (runs from app launch, popover closed or not)
-        watcher.screenshotsDir = screenshotsDir
-        watcher.onCapture = { [weak self] _ in self?.loadScreenshots() }
-        watcher.start()
-        loadScreenshots()
+        renderToggles(reconcileWidth: false)
+        if sidebarVisible { loadScreenshots() }
     }
 
     /// Editor and sidebar share the band y=40...h-30; frames are owned here so the
@@ -369,27 +359,27 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     }
 
     func loadSavedContent() {
-        if let content = try? String(contentsOf: saveURL, encoding: .utf8) {
-            textView.string = content
-            textView.layoutManager?.ensureLayout(for: textView.textContainer!)
-            updateWidth()
+        do {
+            if let content = try storage.loadNote() {
+                textView.string = content
+            }
+            textLines.rebuild(for: textView.string as NSString)
+        } catch {
+            textLines.rebuild(for: textView.string as NSString)
+            reportPersistenceError(error, operation: "Load note")
         }
     }
 
     func textDidChange(_ notification: Notification) {
         scheduleSave()
-        if !toggles.isEmpty || foldsRendered {
-            saveToggles()
-            renderToggles()
-        } else {
-            updateWidth()
-        }
+        scheduleLayoutRefresh()
     }
 
     /// Coalesce per-keystroke writes: the canvas is saved at most once per second
     /// instead of on every keystroke (rewriting a 430KB+ file per keystroke was the
     /// real performance cost). Flushed synchronously via flushSave() on quit.
     private var saveWorkItem: DispatchWorkItem?
+    private var layoutWorkItem: DispatchWorkItem?
 
     func scheduleSave() {
         saveWorkItem?.cancel()
@@ -401,7 +391,20 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     func flushSave() {
         saveWorkItem?.cancel()
         saveWorkItem = nil
-        saveContent()
+        persistCurrentState(synchronously: true)
+    }
+
+    /// NSTextView lays out the visible edit immediately. Expensive full-document width
+    /// and fold reconciliation waits for a short typing pause instead of blocking each key.
+    func scheduleLayoutRefresh() {
+        layoutWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if !self.toggles.isEmpty || self.foldsRendered { self.renderToggles() }
+            else { self.updateWidth() }
+        }
+        layoutWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
     }
 
     func updateWidth() {
@@ -430,7 +433,41 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     }
 
     func saveContent() {
-        try? textView.string.write(to: saveURL, atomically: true, encoding: .utf8)
+        persistCurrentState(synchronously: false)
+    }
+
+    private func persistCurrentState(synchronously: Bool) {
+        let note = textView.string
+        let toggleSnapshot = toggles
+        let operation = { [storage] in
+            do {
+                try storage.saveNote(note)
+                try storage.saveToggles(toggleSnapshot)
+                DispatchQueue.main.async { [weak self] in self?.clearPersistenceError() }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.reportPersistenceError(error, operation: "Save note")
+                }
+            }
+        }
+        if synchronously { persistenceQueue.sync(execute: operation) }
+        else { persistenceQueue.async(execute: operation) }
+    }
+
+    func reportPersistenceError(_ error: Error, operation: String) {
+        let message = "\(operation) failed: \(error.localizedDescription)"
+        NSLog("TermiNotes: %@", message)
+        statusLabel.stringValue = "Not saved"
+        statusLabel.toolTip = message
+        statusLabel.isHidden = false
+        (NSApp.delegate as? AppDelegate)?.statusItem?.button?.toolTip = message
+    }
+
+    private func clearPersistenceError() {
+        statusLabel.stringValue = ""
+        statusLabel.toolTip = nil
+        statusLabel.isHidden = true
+        (NSApp.delegate as? AppDelegate)?.statusItem?.button?.toolTip = "TermiNotes"
     }
 
     @objc func zoomIn() { currentFontSize += 1; updateFont() }
@@ -445,7 +482,7 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     }
 
     @objc func clearAll() {
-        let range = NSRange(location: 0, length: textView.string.count)
+        let range = NSRange(location: 0, length: (textView.string as NSString).length)
         if textView.shouldChangeText(in: range, replacementString: "") {
             textView.textStorage?.replaceCharacters(in: range, with: "")
             textView.didChangeText()
@@ -460,46 +497,24 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     // MARK: - Toggle lists
 
     func lineIndex(ofChar idx: Int) -> Int {
-        lineIndex(ofChar: idx, in: textView.string as NSString)
-    }
-
-    /// 0-based line index = number of newlines strictly before `idx`.
-    func lineIndex(ofChar idx: Int, in s: NSString) -> Int {
-        var line = 0
-        var i = 0
-        let limit = max(0, min(idx, s.length))
-        while i < limit {
-            if s.character(at: i) == 0x0A { line += 1 }
-            i += 1
-        }
-        return line
+        textLines.lineNumber(at: min(idx, (textView.string as NSString).length))
     }
 
     func charRangeOfLine(_ line: Int) -> NSRange? {
-        let s = textView.string as NSString
-        if line < 0 { return nil }
-        var current = 0
-        var start = 0
-        while start <= s.length {
-            let r = s.lineRange(for: NSRange(location: start, length: 0))
-            if current == line { return r }
-            if r.upperBound <= start { return nil }
-            start = r.upperBound
-            current += 1
-        }
-        return nil
+        textLines.range(ofLine: line, stringLength: (textView.string as NSString).length)
     }
 
     func charRange(fromLine a: Int, throughLine b: Int) -> NSRange? {
-        guard let ra = charRangeOfLine(a), let rb = charRangeOfLine(b), rb.upperBound >= ra.location else { return nil }
-        return NSRange(location: ra.location, length: rb.upperBound - ra.location)
+        let length = (textView.string as NSString).length
+        guard let start = textLines.start(ofLine: a),
+              let endRange = textLines.range(ofLine: b, stringLength: length) else { return nil }
+        return NSRange(location: start, length: max(0, endRange.upperBound - start))
     }
 
     /// The implicit body end (inclusive): the line before the next toggle's title,
     /// or the last line of the document. `i` is the index into `toggles` (sorted).
     func bodyEnd(forToggleAt i: Int) -> Int {
-        let s = textView.string as NSString
-        let lastLine = lineIndex(ofChar: s.length, in: s)
+        let lastLine = textLines.lastLine
         guard i >= 0, i < toggles.count else { return lastLine }
         let next = i + 1 < toggles.count ? toggles[i + 1].titleLine - 1 : lastLine
         return min(next, lastLine)
@@ -524,8 +539,8 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         guard sel.length > 0 else { return }
 
         var s = textView.string as NSString
-        var firstBodyLine = lineIndex(ofChar: sel.location, in: s)
-        var lastBodyLine = lineIndex(ofChar: max(sel.location, sel.upperBound - 1), in: s)
+        var firstBodyLine = lineIndex(ofChar: sel.location)
+        var lastBodyLine = lineIndex(ofChar: max(sel.location, sel.upperBound - 1))
 
         var title = firstBodyLine - 1
         var aboveIsUsable = false
@@ -535,7 +550,7 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
         if !aboveIsUsable {
             textView.insertText("Toggle\n", replacementRange: NSRange(location: sel.location, length: 0))
             s = textView.string as NSString
-            title = lineIndex(ofChar: sel.location, in: s)
+            title = lineIndex(ofChar: sel.location)
             firstBodyLine = title + 1
             lastBodyLine += 1
         }
@@ -591,18 +606,17 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     /// Body ends are implicit (next title / EOF), so the only state to maintain is the
     /// title line itself — no per-edit boundary bookkeeping. Runs in didProcessEditing
     /// (pre-save), against lastString (pre-edit snapshot).
-    func adjustToggles(editedRange: NSRange, changeInLength delta: Int) {
+    func adjustToggles(editedRange: NSRange, changeInLength delta: Int, oldLineStarts: [Int], oldTextLength: Int) {
         let newS = textView.string as NSString
-        let oldS = lastString as NSString
-        let preLocation = min(editedRange.location, oldS.length)
-        let preLength = max(0, min(editedRange.length - delta, oldS.length - preLocation))
+        let preLocation = min(editedRange.location, oldTextLength)
+        let preLength = max(0, min(editedRange.length - delta, oldTextLength - preLocation))
         let preRange = NSRange(location: preLocation, length: preLength)
         let isInsertion = preRange.length == 0
-        let editStartLine = lineIndex(ofChar: editedRange.location, in: newS)
-        let oldEditEndLine = lineIndex(ofChar: preRange.upperBound, in: oldS)
-        let newEditEndLine = lineIndex(ofChar: min(editedRange.upperBound, newS.length), in: newS)
+        let editStartLine = textLines.lineNumber(at: editedRange.location)
+        let oldEditEndLine = TextLineIndex.lineNumber(at: preRange.upperBound, starts: oldLineStarts)
+        let newEditEndLine = textLines.lineNumber(at: min(editedRange.upperBound, newS.length))
         let shift = newEditEndLine - oldEditEndLine
-        let lastLine = lineIndex(ofChar: newS.length, in: newS)
+        let lastLine = textLines.lastLine
 
         var out: [ToggleEntry] = []
         out.reserveCapacity(toggles.count)
@@ -611,7 +625,9 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
                 // Nothing destroyed: shift the title only if the insertion lands
                 // at or before the title line's first character. Anything below the
                 // title is automatically inside the toggle (implicit end).
-                let titleStart = charRangeOfLine(t.titleLine)?.location ?? Int.max
+                let titleStart = t.titleLine >= 0 && t.titleLine < oldLineStarts.count
+                    ? oldLineStarts[t.titleLine]
+                    : Int.max
                 if editedRange.location <= titleStart {
                     t.titleLine += shift
                 }
@@ -637,10 +653,17 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
 
     func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range editedRange: NSRange, changeInLength delta: Int) {
         guard editedMask.contains(.editedCharacters) else { return }
+        let oldLineStarts = textLines.starts
+        let oldTextLength = max(0, textStorage.length - delta)
+        textLines.update(afterEditAt: editedRange.location, in: textStorage.string as NSString)
         if !toggles.isEmpty {
-            adjustToggles(editedRange: editedRange, changeInLength: delta)
+            adjustToggles(
+                editedRange: editedRange,
+                changeInLength: delta,
+                oldLineStarts: oldLineStarts,
+                oldTextLength: oldTextLength
+            )
         }
-        lastString = textView.string
     }
 
     /// Keep the caret out of collapsed (invisible) body text.
@@ -662,25 +685,36 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     }
 
     func loadToggles() {
-        guard let data = try? Data(contentsOf: togglesURL),
-              let arr = try? JSONDecoder().decode([ToggleEntry].self, from: data) else { return }
-        let s = textView.string as NSString
-        let maxLine = lineIndex(ofChar: s.length, in: s)
-        var seen = Set<Int>()
-        toggles = arr.compactMap { t in
-            guard t.titleLine >= 0, t.titleLine <= maxLine, seen.insert(t.titleLine).inserted else { return nil }
-            return ToggleEntry(titleLine: t.titleLine, collapsed: t.collapsed)
-        }.sorted { $0.titleLine < $1.titleLine }
+        do {
+            let savedToggles = try storage.loadToggles()
+            var seen = Set<Int>()
+            toggles = savedToggles.compactMap { toggle in
+                guard toggle.titleLine >= 0,
+                      toggle.titleLine <= textLines.lastLine,
+                      seen.insert(toggle.titleLine).inserted else { return nil }
+                return ToggleEntry(titleLine: toggle.titleLine, collapsed: toggle.collapsed)
+            }.sorted { $0.titleLine < $1.titleLine }
+        } catch {
+            reportPersistenceError(error, operation: "Load toggles")
+        }
     }
 
     func saveToggles() {
-        guard let data = try? JSONEncoder().encode(toggles) else { return }
-        try? data.write(to: togglesURL, options: .atomic)
+        let snapshot = toggles
+        persistenceQueue.async { [weak self, storage] in
+            do {
+                try storage.saveToggles(snapshot)
+            } catch {
+                DispatchQueue.main.async {
+                    self?.reportPersistenceError(error, operation: "Save toggles")
+                }
+            }
+        }
     }
 
     /// Fold rendering never touches the string: collapsed body lines get a 0.1pt font +
     /// clear color as *temporary* layout attributes, so copy/save/undo are unaffected.
-    func renderToggles() {
+    func renderToggles(reconcileWidth: Bool = true) {
         guard let lm = textView.layoutManager else { return }
         let s = textView.string as NSString
         let full = NSRange(location: 0, length: s.length)
@@ -701,7 +735,7 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
                 lm.addTemporaryAttribute(.foregroundColor, value: NSColor.clear, forCharacterRange: bodyRange)
             }
         }
-        updateWidth()
+        if reconcileWidth { updateWidth() }
         gutter.needsDisplay = true
     }
 
@@ -710,6 +744,11 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
     }
 
     // MARK: - Screenshot sidebar
+
+    func noteScreenshotCapture() {
+        screenshotsNeedReload = true
+        if sidebarVisible { loadScreenshots() }
+    }
 
     @objc func toggleSidebar(_ sender: Any?) {
         sidebarVisible.toggle()
@@ -721,39 +760,45 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
             popover.contentSize = size
         }
         view.needsLayout = true
+        if sidebarVisible { loadScreenshots() }
     }
 
     func loadScreenshots() {
-        let files = (try? FileManager.default.contentsOfDirectory(at: screenshotsDir, includingPropertiesForKeys: nil)) ?? []
-        var shots = files.filter { ScreenshotWatcher.imageExts.contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
-        if shots.count > 50 {
-            for url in shots.dropFirst(50) { try? FileManager.default.removeItem(at: url) }
-            shots = Array(shots.prefix(50))
+        guard sidebarVisible else {
+            screenshotsNeedReload = true
+            return
         }
-        screenshotFiles = shots
-        rebuildThumbs()
-    }
-
-    func makeThumb(from url: URL) -> NSImage? {
-        guard let img = NSImage(contentsOf: url), img.size.width > 0, img.size.height > 0 else { return nil }
-        let scale = min(320 / img.size.width, 200 / img.size.height, 1.0)
-        let target = NSSize(width: floor(img.size.width * scale), height: floor(img.size.height * scale))
-        let thumb = NSImage(size: target)
-        thumb.lockFocus()
-        img.draw(in: NSRect(origin: .zero, size: target), from: NSRect(origin: .zero, size: img.size), operation: .sourceOver, fraction: 1.0)
-        thumb.unlockFocus()
-        return thumb
+        guard screenshotsNeedReload else { return }
+        screenshotLoadGeneration += 1
+        let generation = screenshotLoadGeneration
+        screenshotIndexQueue.async { [weak self, storage] in
+            do {
+                let files = try storage.screenshotFiles()
+                DispatchQueue.main.async {
+                    guard let self, generation == self.screenshotLoadGeneration else { return }
+                    self.totalScreenshotCount = files.count
+                    self.screenshotFiles = Array(files.prefix(Self.sidebarDisplayLimit))
+                    self.screenshotsNeedReload = false
+                    self.rebuildThumbs()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.reportPersistenceError(error, operation: "Load screenshots")
+                }
+            }
+        }
     }
 
     func rebuildThumbs() {
         thumbsStack.arrangedSubviews.forEach { thumbsStack.removeArrangedSubview($0); $0.removeFromSuperview() }
         emptyLabel.isHidden = !screenshotFiles.isEmpty
+        screenshotHeader.stringValue = totalScreenshotCount > Self.sidebarDisplayLimit
+            ? "Latest \(Self.sidebarDisplayLimit) of \(totalScreenshotCount)"
+            : "Screenshots (\(totalScreenshotCount))"
         for url in screenshotFiles {
-            guard let thumb = makeThumb(from: url) else { continue }
             let view = ThumbnailView(frame: NSRect(x: 0, y: 0, width: 160, height: 116))
             view.fileURL = url
-            view.setImage(thumb)
+            view.setImage(NSImage(systemSymbolName: "photo", accessibilityDescription: "Loading screenshot") ?? NSImage())
             view.setPath(url.path)
             view.toolTip = url.path
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -763,6 +808,10 @@ class TermiNotesController: NSViewController, NSTextViewDelegate, NSTextStorageD
             ])
             view.onClick = { [weak self] v, count in self?.thumbClicked(v, clickCount: count) }
             thumbsStack.addArrangedSubview(view)
+            thumbnailLoader.load(url) { [weak view] image in
+                guard let view, view.fileURL == url, let image else { return }
+                view.setImage(image)
+            }
         }
     }
 
@@ -806,7 +855,10 @@ class ResizeHandleView: NSView {
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     let popover = NSPopover()
-    let controller = TermiNotesController()
+    let storage = TermiNotesStorage()
+    lazy var watcher = ScreenshotWatcher(storage: storage)
+    private var controller: TermiNotesController?
+    private var pendingPersistenceError: Error?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
@@ -829,10 +881,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.action = #selector(togglePopover)
             button.target = self
         }
-        popover.contentSize = NSSize(width: controller.sidebarVisible ? 400 + TermiNotesController.sidebarWidth : 400, height: 300)
+        let sidebarVisible = UserDefaults.standard.object(forKey: "sidebarVisible") as? Bool ?? false
+        popover.contentSize = NSSize(width: sidebarVisible ? 400 + TermiNotesController.sidebarWidth : 400, height: 300)
         popover.behavior = .semitransient // stays up during sidebar drag-out / clicks
-        popover.contentViewController = controller
-        _ = controller.view // force loadView so the screenshot watcher starts at launch
+        watcher.onCapture = { [weak self] _ in self?.controller?.noteScreenshotCapture() }
+        watcher.onError = { [weak self] error in
+            guard let self else { return }
+            if let controller = self.controller {
+                controller.reportPersistenceError(error, operation: "Screenshot persistence")
+            } else {
+                self.pendingPersistenceError = error
+                let message = "Screenshot persistence failed: \(error.localizedDescription)"
+                NSLog("TermiNotes: %@", message)
+                self.statusItem?.button?.toolTip = message
+            }
+        }
+        watcher.start()
     }
     
     func setupMenu() {
@@ -951,19 +1015,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem?.button {
             if popover.isShown { popover.performClose(nil) }
             else {
-                controller.loadScreenshots() // pick up anything captured while closed
+                let controller = ensureController()
+                if controller.sidebarVisible { controller.loadScreenshots() }
                 popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 NSApp.activate(ignoringOtherApps: true)
                 if let window = controller.textView.window {
                     window.makeKey()
                     window.makeFirstResponder(controller.textView)
                 }
+                controller.scheduleLayoutRefresh()
             }
         }
     }
 
+    private func ensureController() -> TermiNotesController {
+        if let controller { return controller }
+        let created = TermiNotesController(storage: storage)
+        controller = created
+        popover.contentViewController = created
+        popover.contentSize = NSSize(
+            width: created.sidebarVisible ? 400 + TermiNotesController.sidebarWidth : 400,
+            height: 300
+        )
+        _ = created.view
+        if let pendingPersistenceError {
+            created.reportPersistenceError(pendingPersistenceError, operation: "Screenshot persistence")
+            self.pendingPersistenceError = nil
+        }
+        return created
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        controller.flushSave()
+        controller?.flushSave()
     }
 }
 
@@ -1037,161 +1120,15 @@ class ThumbnailView: NSView, NSDraggingSource {
     }
 }
 
-// MARK: - Screenshot clipboard watcher
-
-/// Watches TWO screenshot sources (~1s poll):
-/// 1. The general pasteboard (Ctrl+Cmd+Shift+3/4 copies the image).
-/// 2. The macOS screenshot save folder (Cmd+Shift+3/4 saves a file without
-///    touching the pasteboard) — location from com.apple.screencapture, default ~/Desktop.
-class ScreenshotWatcher: NSObject {
-    static let imageExts: Set<String> = ["png", "jpg", "jpeg", "tiff", "tif", "heic", "gif", "bmp"]
-
-    var screenshotsDir: URL?
-    var onCapture: ((URL) -> Void)?
-    private var lastChangeCount: Int = NSPasteboard.general.changeCount
-    private var timer: Timer?
-
-    private var watchDir: URL?
-    private var knownFiles: Set<String> = []
-    private var pendingSizes: [String: UInt64] = [:]
-
-    /// Content hashes of everything already in the history — re-copies of an existing
-    /// entry (sidebar click-copy echoed back by a clipboard manager, the same file
-    /// saved twice, etc.) are dropped instead of duplicated.
-    private var knownHashes = Set<UInt64>()
-
-    private static func fnv1a(_ data: Data) -> UInt64 {
-        var hash: UInt64 = 14695981039346656037
-        for b in data { hash ^= UInt64(b); hash = hash &* 1099511628211 }
-        return hash
-    }
-
-    func start() {
-        watchDir = ScreenshotWatcher.resolveScreenshotDir()
-        if let dir = watchDir, let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
-            knownFiles = Set(files) // pre-existing files are never imported
-        }
-        if let dir = screenshotsDir {
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-                for f in files where Self.imageExts.contains(f.pathExtension.lowercased()) {
-                    if let d = try? Data(contentsOf: f) {
-                        let h = Self.fnv1a(d)
-                        DispatchQueue.main.async { self?.knownHashes.insert(h) }
-                    }
-                }
-            }
-        }
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.checkPasteboard()
-            self?.checkWatchDir()
-        }
-    }
-
-    /// Hash an existing history file into the dedup set (called when we copy it out).
-    func noteExisting(_ url: URL) {
-        if let d = try? Data(contentsOf: url) {
-            knownHashes.insert(Self.fnv1a(d))
-        }
-    }
-
-    /// Where macOS saves Cmd+Shift+3/4 screenshots (honors `defaults write com.apple.screencapture location`).
-    static func resolveScreenshotDir() -> URL {
-        if let loc = UserDefaults(suiteName: "com.apple.screencapture")?.string(forKey: "location"), !loc.isEmpty {
-            return URL(fileURLWithPath: (loc as NSString).expandingTildeInPath)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
-    }
-
-    /// Call after WE write to the pasteboard (thumbnail click-copy) so it isn't re-captured.
-    func ignoreCurrentPasteboard() {
-        lastChangeCount = NSPasteboard.general.changeCount
-    }
-
-    private func checkPasteboard() {
-        let pb = NSPasteboard.general
-        guard pb.changeCount != lastChangeCount else { return }
-        lastChangeCount = pb.changeCount
-
-        var png = pb.data(forType: .png)
-        if png == nil, let tiff = pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) {
-            png = rep.representation(using: .png, properties: [:])
-        }
-        guard let data = png, let dir = screenshotsDir else { return }
-        let hash = Self.fnv1a(data)
-        guard !knownHashes.contains(hash) else { return } // duplicate of an existing entry
-        knownHashes.insert(hash)
-
-        let stamp = Self.timestamp(for: Date())
-        var url = dir.appendingPathComponent("\(stamp).png")
-        var n = 2
-        while FileManager.default.fileExists(atPath: url.path) {
-            url = dir.appendingPathComponent("\(stamp)-\(n).png")
-            n += 1
-        }
-        try? data.write(to: url)
-        onCapture?(url)
-    }
-
-    private func checkWatchDir() {
-        guard let dir = watchDir,
-              let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
-        knownFiles.formIntersection(files)
-        for name in files where !knownFiles.contains(name) {
-            let ext = (name as NSString).pathExtension.lowercased()
-            guard Self.imageExts.contains(ext) else {
-                knownFiles.insert(name) // not an image; don't rescan it every poll
-                continue
-            }
-            let url = dir.appendingPathComponent(name)
-            let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64) ?? 0
-            // Import only when the size is stable across two polls (screenshot finished writing).
-            if let prev = pendingSizes[name], prev == size, size > 0 {
-                knownFiles.insert(name)
-                pendingSizes.removeValue(forKey: name)
-                importFile(at: url)
-            } else {
-                pendingSizes[name] = size
-            }
-        }
-        for name in pendingSizes.keys where !files.contains(name) {
-            pendingSizes.removeValue(forKey: name)
-        }
-    }
-
-    /// Copies a screenshot file into our history dir, named by its creation date so
-    /// sidebar sorting (newest-first by filename) stays chronological.
-    private func importFile(at url: URL) {
-        guard let dir = screenshotsDir,
-              let data = try? Data(contentsOf: url) else { return }
-        let hash = Self.fnv1a(data)
-        guard !knownHashes.contains(hash) else { return } // same image already in history
-        knownHashes.insert(hash)
-
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let date = (attrs?[.creationDate] as? Date) ?? Date()
-        let stamp = Self.timestamp(for: date)
-        let ext = url.pathExtension.lowercased()
-        var dest = dir.appendingPathComponent("\(stamp).\(ext)")
-        var n = 2
-        while FileManager.default.fileExists(atPath: dest.path) {
-            dest = dir.appendingPathComponent("\(stamp)-\(n).\(ext)")
-            n += 1
-        }
-        try? FileManager.default.copyItem(at: url, to: dest)
-        onCapture?(dest)
-    }
-
-    private static func timestamp(for date: Date) -> String {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd-HHmmss"
-        return fmt.string(from: date)
+#if !TERMINOTES_VERIFICATION
+@main
+struct TermiNotesApplication {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)
+        app.run()
     }
 }
-
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.accessory)
-app.run()
+#endif
