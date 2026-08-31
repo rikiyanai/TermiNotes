@@ -16,6 +16,7 @@ struct TermiNotesVerification {
     static func main() throws {
         try verifyStorageRoundTrip()
         try verifyStorageFailureIsSurfaced()
+        try verifyTerminalSanitizerPreservesIndentation()
         try verifyScreenshotWatcherSources()
         try verifyLineIndexCorrectness()
         try verifyLargeDocumentLookupCost()
@@ -76,6 +77,13 @@ struct TermiNotesVerification {
         } catch let failure as VerificationFailure {
             throw failure
         } catch {}
+    }
+
+    private static func verifyTerminalSanitizerPreservesIndentation() throws {
+        let source = "  table\n    row  \n\n"
+        let copied = TerminalSanitizer.sanitize(source)
+        try expect(copied == "  table \\\n    row  ", "terminal copy changed line indentation or trailing spaces")
+        try expect(!copied.hasSuffix("\n"), "terminal copy retained a trailing newline")
     }
 
     private static func verifyLineIndexCorrectness() throws {

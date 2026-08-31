@@ -9,6 +9,10 @@
 
 A hyper-lightweight macOS menu bar utility for developers who need to store and sanitize terminal outputs, ASCII diagrams, and multi-line commands without them "breaking."
 
+The annotated view below shows the menu-bar workflow: screenshot/clipboard history in the **Shots** shelf, terminal-safe copy that keeps indentation for tables and diagrams, native **Find**/**Replace**, and collapsible toggle lists.
+
+![Annotated TermiNotes menu-bar clipboard and screenshot history](docs/terminotes-menu-bar-history.png)
+
 ## Installation
 
 ### 1. Build
@@ -36,11 +40,12 @@ Standard note apps often "help" you by converting straight quotes to smart quote
 
 - **Menu Bar Resident:** Lives in your top bar (look for the `>_N` icon).
 - **Canonical No-Wrap:** ASCII art and terminal graphs (like `git log --graph`) never wrap. They scroll horizontally, preserving their visual structure.
-- **Terminal Sanitizer:** Copy text back to the terminal safely with `CMD + Shift + C`. It automatically:
+- **Terminal Sanitizer:** Copy text back to the terminal safely with `CMD + Shift + C`. It preserves each line's leading and trailing spaces so terminal tables and diagrams stay aligned, then:
     - Escapes newlines with ` \` for safe multi-line pasting.
     - Converts "smart" quotes and dashes back to ASCII.
     - Trims trailing newlines to prevent accidental command execution.
 - **Zoom & Resize:** On-the-fly font scaling (`CMD +/-`) and a custom corner dragger for window expansion.
+- **Find & Replace:** The **Find** button opens AppKit's native find bar/panel, including replacement actions, without changing the raw note buffer until you edit it.
 - **Toggle Lists:** Notion-style collapsing. Select a chunk of lines, right-click → **Toggle List** — the line above the selection becomes the title (or a `Toggle` line is inserted) and it starts **expanded**, so nothing vanishes. Click the `>`/`v` chevron in the left gutter next to the title to collapse/expand, or use `Option-click` on the title, `CMD + \`, or the right-click menu. Folds survive restarts (`toggles.json`).
 - **Screenshot Sidebar:** Maccy-style clipboard history for images only — hidden by default, toggle with the **Shots** button or `CMD + Option + S`. Use the macOS clipboard screenshot shortcut (`Ctrl+CMD+Shift+3/4`); TermiNotes does not probe the privacy-controlled Desktop at launch. Every accepted image is atomically persisted under `~/Library/Application Support/TermiNotes/screenshots`; failures are shown instead of silently ignored, and history is not silently truncated. The shelf renders the newest 50 thumbnails to keep UI work bounded while every file remains on disk. Click a thumbnail to copy its path, double-click to insert a Markdown image link, or drag it to another app.
 - **Pure AppKit:** Built with native macOS APIs for near-zero memory footprint and maximum responsiveness.

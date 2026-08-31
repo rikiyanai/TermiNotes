@@ -1,5 +1,13 @@
 # Failure Log
 
+## 2026-08-31 — FL-0002: terminal copy removed diagram indentation
+- **Status:** VERIFIED
+- **Category:** CORRECTNESS / TERMINAL UX
+- **Requirement:** The explicit terminal-copy action must keep table and diagram indentation while still removing only trailing newline separators.
+- **Observed mismatch:** `TerminalSanitizer` trimmed every line with `.trimmingCharacters(in: .whitespaces)`, then trimmed the final result with `.whitespacesAndNewlines`; the README and the supplied annotated screenshot promised indentation preservation that the implementation did not provide.
+- **Fix:** Preserve each split line verbatim, remove only empty trailing newline components, and keep the existing smart-punctuation and shell-continuation transformations.
+- **Verification:** `Tests/TermiNotesVerification.swift` now covers an indented table row with trailing spaces and asserts that the copied result has no final newline. `bash verify.sh` is the required full build/verification command.
+
 ## 2026-08-10 — FL-0001: Persistence and latency owners are explicit
 - **Status:** VERIFIED
 - **Category:** PERFORMANCE / MAINTAINABILITY

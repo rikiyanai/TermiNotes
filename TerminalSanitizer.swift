@@ -3,8 +3,9 @@ import Foundation
 struct TerminalSanitizer {
     /// Sanitizes text for safe pasting into a terminal.
     /// - Converts smart quotes and dashes to ASCII.
+    /// - Preserves leading and trailing spaces on every retained line.
     /// - Joins multiple lines with " \" to prevent immediate execution.
-    /// - Trims trailing newlines.
+    /// - Removes only trailing newline separators.
     static func sanitize(_ text: String) -> String {
         var result = text
         
@@ -18,9 +19,10 @@ struct TerminalSanitizer {
         result = result.replacingOccurrences(of: "\u{2026}", with: "...") // Ellipsis
         
         // 3. Handle Multiline Commands
-        let lines = result.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        var lines = result.components(separatedBy: .newlines)
+        while lines.last == "" { lines.removeLast() }
+
+        guard !lines.isEmpty else { return "" }
         
         if lines.count > 1 {
             // Join with backslash for line continuation
@@ -29,7 +31,8 @@ struct TerminalSanitizer {
             result = lines.first ?? ""
         }
         
-        // 4. Final trim to ensure no trailing newline triggers execution
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 4. The line split removed trailing newline separators without touching
+        // indentation or intentional spaces inside the retained lines.
+        return result
     }
 }
