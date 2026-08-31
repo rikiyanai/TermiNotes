@@ -9,6 +9,10 @@
 
 A hyper-lightweight macOS menu bar utility for developers who need to store and sanitize terminal outputs, ASCII diagrams, and multi-line commands without them "breaking."
 
+The annotated view below shows the menu-bar workflow: screenshot/clipboard history in the **Shots** shelf, terminal-safe copy that keeps indentation for tables and diagrams, native **Find**/**Replace**, and collapsible toggle lists.
+
+![Annotated TermiNotes menu-bar clipboard and screenshot history](docs/terminotes-menu-bar-history.png)
+
 ## Installation
 
 ### 1. Build
