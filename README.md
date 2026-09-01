@@ -7,9 +7,19 @@
   </tr>
 </table>
 
-A hyper-lightweight macOS menu bar utility for developers who need to store and sanitize terminal outputs, ASCII diagrams, and multi-line commands without them "breaking."
+TermiNotes is a macOS menu-bar scratchpad for terminal work. It keeps pasted
+terminal output, ASCII diagrams, tables, and multi-line commands in plain
+monospace text so they can be copied back without smart quotes, wrapped lines,
+or accidental command execution.
 
-The annotated view below shows the menu-bar workflow: screenshot/clipboard history in the **Shots** shelf, terminal-safe copy that keeps indentation for tables and diagrams, native **Find**/**Replace**, and collapsible toggle lists.
+It is useful when the thing you are saving is layout-sensitive: command output,
+`git log --graph`, stack traces, terminal tables, prompt fragments, or quick
+notes that need to stay exactly shaped.
+
+The annotated screenshot shows the main workflow: the app lives in the menu
+bar, keeps an image-only screenshot history in **Shots**, preserves indentation
+for terminal-safe copy, supports **Find**/**Replace**, and lets sections collapse
+as toggle lists.
 
 ![Annotated TermiNotes menu-bar clipboard and screenshot history](docs/terminotes-menu-bar-history.png)
 
@@ -34,7 +44,11 @@ chmod +x ~/bin/terminotes
 
 ## Why TermiNotes?
 
-Standard note apps often "help" you by converting straight quotes to smart quotes, dashes to em-dashes, and wrapping long lines. This destroys terminal diagrams and breaks code snippets. TermiNotes is built to be a "dumb" raw buffer that preserves everything exactly as it was in the terminal.
+Standard note apps often rewrite text: straight quotes become smart quotes,
+dashes change shape, long lines wrap, and trailing newlines sneak into copied
+commands. Those changes break terminal diagrams and can make pasted commands
+unsafe. TermiNotes is deliberately plain: paste terminal-shaped text, keep its
+shape, find or fold what you need, and copy it back safely.
 
 ## Key Features
 
